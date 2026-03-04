@@ -259,6 +259,9 @@ impl<'a> Parser<'a> {
                 Keyword::Call => {
                     opcodes.push(self.parse_call()?);
                 }
+                Keyword::PhaseBarrier => {
+                    opcodes.push(self.parse_phase_barrier()?);
+                }
                 _ => break,
             }
         }
@@ -777,6 +780,27 @@ impl<'a> Parser<'a> {
         let outputs = self.parse_witness_vector()?;
 
         Ok(Opcode::Call { id: AcirFunctionId(id), inputs, outputs, predicate })
+    }
+
+    /// Parse: `PHASE_BARRIER phase: <u32>, commits: [w1, w2, ...], outputs: [w3, ...]`
+    fn parse_phase_barrier(&mut self) -> ParseResult<Opcode<FieldElement>> {
+        self.eat_keyword_or_error(Keyword::PhaseBarrier)?;
+
+        self.eat_keyword_or_error(Keyword::Phase)?;
+        self.eat_or_error(Token::Colon)?;
+        let phase_id = self.eat_u32_or_error()?;
+        self.eat_comma_or_error()?;
+
+        self.eat_keyword_or_error(Keyword::Commits)?;
+        self.eat_or_error(Token::Colon)?;
+        let commit_witnesses = self.parse_witness_vector()?;
+        self.eat_comma_or_error()?;
+
+        self.eat_keyword_or_error(Keyword::Outputs)?;
+        self.eat_or_error(Token::Colon)?;
+        let challenge_outputs = self.parse_witness_vector()?;
+
+        Ok(Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs })
     }
 
     fn eat_predicate(&mut self) -> ParseResult<Expression<FieldElement>> {

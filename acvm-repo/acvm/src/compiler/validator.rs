@@ -402,6 +402,21 @@ pub fn validate_witness<F: AcirField>(
                     }
                 }
             }
+            Opcode::PhaseBarrier { phase_id: _, commit_witnesses, challenge_outputs } => {
+                // Verify all committed witnesses have assigned values
+                for w in commit_witnesses {
+                    if witness_map.get(w).is_none() {
+                        return Err(OpcodeNotSolvable::MissingAssignment(w.0).into());
+                    }
+                }
+                // Verify challenge output witnesses have assigned values
+                // (they should have been injected by the backend)
+                for w in challenge_outputs {
+                    if witness_map.get(w).is_none() {
+                        return Err(OpcodeNotSolvable::MissingAssignment(w.0).into());
+                    }
+                }
+            }
         }
     }
 
@@ -472,6 +487,7 @@ mod tests {
             return_values: PublicInputs::default(),
             assert_messages: Default::default(),
             function_name: "test".to_string(),
+            num_phases: 0,
         }
     }
 

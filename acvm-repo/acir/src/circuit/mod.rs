@@ -72,6 +72,10 @@ pub struct Circuit<F: AcirField> {
     // c++ code at the moment when it is, due to OpcodeLocation needing a comparison
     // implementation which is never generated.
     pub assert_messages: Vec<(OpcodeLocation, AssertionPayload<F>)>,
+    /// Number of phase barriers in this circuit. 0 means single-phase (legacy behavior).
+    /// The backend uses this to pre-allocate commitment round structures.
+    #[serde(default)]
+    pub num_phases: u32,
 }
 
 /// Enumeration of either an [expression][Expression] or a [memory identifier][BlockId].

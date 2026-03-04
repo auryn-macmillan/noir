@@ -156,6 +156,20 @@ impl CircuitSimulator {
                 }
                 true
             }
+            Opcode::PhaseBarrier { phase_id: _, commit_witnesses, challenge_outputs } => {
+                // All commit witnesses must be solvable before the barrier
+                for w in commit_witnesses {
+                    if !self.solvable_witnesses.contains(w) {
+                        return false;
+                    }
+                }
+                // Challenge outputs become solvable after the barrier
+                // (injected by the backend)
+                for w in challenge_outputs {
+                    self.mark_solvable(*w);
+                }
+                true
+            }
         }
     }
 

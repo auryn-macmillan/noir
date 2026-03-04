@@ -178,6 +178,12 @@ pub(crate) enum Keyword {
     ProofType,
     /// hash_values
     HashValues,
+    /// PHASE_BARRIER
+    PhaseBarrier,
+    /// phase
+    Phase,
+    /// commits
+    Commits,
 }
 
 impl Keyword {
@@ -223,6 +229,9 @@ impl Keyword {
             "key_hash" => Keyword::KeyHash,
             "proof_type" => Keyword::ProofType,
             "hash_values" => Keyword::HashValues,
+            "PHASE_BARRIER" => Keyword::PhaseBarrier,
+            "phase" => Keyword::Phase,
+            "commits" => Keyword::Commits,
             _ => return None,
         };
         Some(Token::Keyword(keyword))
@@ -272,6 +281,9 @@ impl std::fmt::Display for Keyword {
             Keyword::KeyHash => write!(f, "key_hash"),
             Keyword::ProofType => write!(f, "proof_type"),
             Keyword::HashValues => write!(f, "hash_values"),
+            Keyword::PhaseBarrier => write!(f, "PHASE_BARRIER"),
+            Keyword::Phase => write!(f, "phase"),
+            Keyword::Commits => write!(f, "commits"),
         }
     }
 }

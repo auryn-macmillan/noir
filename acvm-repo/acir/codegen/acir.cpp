@@ -3147,7 +3147,32 @@ namespace Acir {
             }
         };
 
-        std::variant<AssertZero, BlackBoxFuncCall, MemoryOp, MemoryInit, BrilligCall, Call> value;
+        struct PhaseBarrier {
+            uint32_t phase_id;
+            std::vector<Acir::Witness> commit_witnesses;
+            std::vector<Acir::Witness> challenge_outputs;
+
+            friend bool operator==(const PhaseBarrier&, const PhaseBarrier&);
+
+            void msgpack_unpack(msgpack::object const& o) {
+                std::string name = "PhaseBarrier";
+                if (o.type == msgpack::type::MAP) {
+                    auto kvmap = Helpers::make_kvmap(o, name);
+                    Helpers::conv_fld_from_kvmap(kvmap, name, "phase_id", phase_id, false);
+                    Helpers::conv_fld_from_kvmap(kvmap, name, "commit_witnesses", commit_witnesses, false);
+                    Helpers::conv_fld_from_kvmap(kvmap, name, "challenge_outputs", challenge_outputs, false);
+                } else if (o.type == msgpack::type::ARRAY) {
+                    auto array = o.via.array; 
+                    Helpers::conv_fld_from_array(array, name, "phase_id", phase_id, 0);
+                    Helpers::conv_fld_from_array(array, name, "commit_witnesses", commit_witnesses, 1);
+                    Helpers::conv_fld_from_array(array, name, "challenge_outputs", challenge_outputs, 2);
+                } else {
+                    throw_or_abort("expected MAP or ARRAY for " + name);
+                }
+            }
+        };
+
+        std::variant<AssertZero, BlackBoxFuncCall, MemoryOp, MemoryInit, BrilligCall, Call, PhaseBarrier> value;
 
         friend bool operator==(const Opcode&, const Opcode&);
 
@@ -3233,6 +3258,17 @@ namespace Acir {
                 } catch (const msgpack::type_error&) {
                     std::cerr << o << std::endl;
                     throw_or_abort("error converting into enum variant 'Opcode::Call'");
+                }
+                
+                value = v;
+            }
+            else if (tag == "PhaseBarrier") {
+                PhaseBarrier v;
+                try {
+                    o.via.map.ptr[0].val.convert(v);
+                } catch (const msgpack::type_error&) {
+                    std::cerr << o << std::endl;
+                    throw_or_abort("error converting into enum variant 'Opcode::PhaseBarrier'");
                 }
                 
                 value = v;
@@ -3466,6 +3502,7 @@ namespace Acir {
         Acir::PublicInputs public_parameters;
         Acir::PublicInputs return_values;
         std::vector<std::tuple<Acir::OpcodeLocation, Acir::AssertionPayload>> assert_messages;
+        uint32_t num_phases;
 
         friend bool operator==(const Circuit&, const Circuit&);
 
@@ -3480,6 +3517,7 @@ namespace Acir {
                 Helpers::conv_fld_from_kvmap(kvmap, name, "public_parameters", public_parameters, false);
                 Helpers::conv_fld_from_kvmap(kvmap, name, "return_values", return_values, false);
                 Helpers::conv_fld_from_kvmap(kvmap, name, "assert_messages", assert_messages, false);
+                Helpers::conv_fld_from_kvmap(kvmap, name, "num_phases", num_phases, false);
             } else if (o.type == msgpack::type::ARRAY) {
                 auto array = o.via.array; 
                 Helpers::conv_fld_from_array(array, name, "function_name", function_name, 0);
@@ -3489,6 +3527,7 @@ namespace Acir {
                 Helpers::conv_fld_from_array(array, name, "public_parameters", public_parameters, 4);
                 Helpers::conv_fld_from_array(array, name, "return_values", return_values, 5);
                 Helpers::conv_fld_from_array(array, name, "assert_messages", assert_messages, 6);
+                Helpers::conv_fld_from_array(array, name, "num_phases", num_phases, 7);
             } else {
                 throw_or_abort("expected MAP or ARRAY for " + name);
             }
@@ -5814,6 +5853,7 @@ namespace Acir {
         if (!(lhs.public_parameters == rhs.public_parameters)) { return false; }
         if (!(lhs.return_values == rhs.return_values)) { return false; }
         if (!(lhs.assert_messages == rhs.assert_messages)) { return false; }
+        if (!(lhs.num_phases == rhs.num_phases)) { return false; }
         return true;
     }
 
@@ -5830,6 +5870,7 @@ void serde::Serializable<Acir::Circuit>::serialize(const Acir::Circuit &obj, Ser
     serde::Serializable<decltype(obj.public_parameters)>::serialize(obj.public_parameters, serializer);
     serde::Serializable<decltype(obj.return_values)>::serialize(obj.return_values, serializer);
     serde::Serializable<decltype(obj.assert_messages)>::serialize(obj.assert_messages, serializer);
+    serde::Serializable<decltype(obj.num_phases)>::serialize(obj.num_phases, serializer);
     serializer.decrease_container_depth();
 }
 
@@ -5845,6 +5886,7 @@ Acir::Circuit serde::Deserializable<Acir::Circuit>::deserialize(Deserializer &de
     obj.public_parameters = serde::Deserializable<decltype(obj.public_parameters)>::deserialize(deserializer);
     obj.return_values = serde::Deserializable<decltype(obj.return_values)>::deserialize(deserializer);
     obj.assert_messages = serde::Deserializable<decltype(obj.assert_messages)>::deserialize(deserializer);
+    obj.num_phases = serde::Deserializable<decltype(obj.num_phases)>::deserialize(deserializer);
     deserializer.decrease_container_depth();
     return obj;
 }
@@ -6629,6 +6671,35 @@ Acir::Opcode::Call serde::Deserializable<Acir::Opcode::Call>::deserialize(Deseri
     obj.inputs = serde::Deserializable<decltype(obj.inputs)>::deserialize(deserializer);
     obj.outputs = serde::Deserializable<decltype(obj.outputs)>::deserialize(deserializer);
     obj.predicate = serde::Deserializable<decltype(obj.predicate)>::deserialize(deserializer);
+    return obj;
+}
+
+namespace Acir {
+
+    inline bool operator==(const Opcode::PhaseBarrier &lhs, const Opcode::PhaseBarrier &rhs) {
+        if (!(lhs.phase_id == rhs.phase_id)) { return false; }
+        if (!(lhs.commit_witnesses == rhs.commit_witnesses)) { return false; }
+        if (!(lhs.challenge_outputs == rhs.challenge_outputs)) { return false; }
+        return true;
+    }
+
+} // end of namespace Acir
+
+template <>
+template <typename Serializer>
+void serde::Serializable<Acir::Opcode::PhaseBarrier>::serialize(const Acir::Opcode::PhaseBarrier &obj, Serializer &serializer) {
+    serde::Serializable<decltype(obj.phase_id)>::serialize(obj.phase_id, serializer);
+    serde::Serializable<decltype(obj.commit_witnesses)>::serialize(obj.commit_witnesses, serializer);
+    serde::Serializable<decltype(obj.challenge_outputs)>::serialize(obj.challenge_outputs, serializer);
+}
+
+template <>
+template <typename Deserializer>
+Acir::Opcode::PhaseBarrier serde::Deserializable<Acir::Opcode::PhaseBarrier>::deserialize(Deserializer &deserializer) {
+    Acir::Opcode::PhaseBarrier obj;
+    obj.phase_id = serde::Deserializable<decltype(obj.phase_id)>::deserialize(deserializer);
+    obj.commit_witnesses = serde::Deserializable<decltype(obj.commit_witnesses)>::deserialize(deserializer);
+    obj.challenge_outputs = serde::Deserializable<decltype(obj.challenge_outputs)>::deserialize(deserializer);
     return obj;
 }
 

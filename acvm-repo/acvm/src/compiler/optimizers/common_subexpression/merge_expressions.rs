@@ -232,6 +232,12 @@ impl<F: AcirField> MergeExpressionsOptimizer<F> {
                 witnesses.extend(CircuitSimulator::expr_witness(predicate));
                 witnesses
             }
+            Opcode::PhaseBarrier { commit_witnesses, challenge_outputs, .. } => {
+                let mut witnesses: BTreeSet<Witness> =
+                    commit_witnesses.iter().copied().collect();
+                witnesses.extend(challenge_outputs);
+                witnesses
+            }
         }
     }
 

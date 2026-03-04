@@ -222,6 +222,15 @@ fn transform_internal_once<F: AcirField>(
                 new_acir_opcode_positions.push(acir_opcode_positions[index]);
                 transformed_opcodes.push(opcode);
             }
+            Opcode::PhaseBarrier { ref challenge_outputs, .. } => {
+                // Challenge outputs are produced by the backend after the barrier,
+                // so mark them as solvable. The opcode passes through unchanged.
+                for witness in challenge_outputs {
+                    transformer.mark_solvable(*witness);
+                }
+                new_acir_opcode_positions.push(acir_opcode_positions[index]);
+                transformed_opcodes.push(opcode);
+            }
         }
     }
 
@@ -337,6 +346,10 @@ where
                 self.fold_expr(predicate);
                 self.fold_many(inputs.iter());
                 self.fold_many(outputs.iter());
+            }
+            Opcode::PhaseBarrier { phase_id: _, commit_witnesses, challenge_outputs } => {
+                self.fold_many(commit_witnesses.iter());
+                self.fold_many(challenge_outputs.iter());
             }
         }
     }

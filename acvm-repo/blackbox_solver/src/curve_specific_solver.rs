@@ -28,6 +28,37 @@ pub trait BlackBoxFunctionSolver<F> {
     ) -> Result<(F, F, F), BlackBoxResolutionError>;
 
     fn poseidon2_permutation(&self, inputs: &[F]) -> Result<Vec<F>, BlackBoxResolutionError>;
+
+    /// Commit to witness values and derive Fiat-Shamir challenge(s).
+    ///
+    /// The backend should:
+    /// 1. Interpret `witness_values` as data to be committed
+    /// 2. Commit using its native polynomial commitment scheme
+    /// 3. Absorb the commitment into its Fiat-Shamir transcript
+    /// 4. Squeeze `num_challenges` independent challenge values
+    ///
+    /// The challenge derivation must be deterministic: given the same
+    /// `witness_values`, the same challenges are always produced. The
+    /// verifier independently recomputes the same challenges from the
+    /// proof's commitments.
+    ///
+    /// `phase_id` identifies which phase transition this is, allowing
+    /// the backend to maintain ordered transcript state across multiple
+    /// barriers in a single circuit.
+    ///
+    /// The default implementation returns an error for backends that
+    /// do not support multi-phase proving.
+    fn derive_phase_challenge(
+        &self,
+        _phase_id: u32,
+        _witness_values: &[F],
+        _num_challenges: usize,
+    ) -> Result<Vec<F>, BlackBoxResolutionError> {
+        Err(BlackBoxResolutionError::Failed(
+            BlackBoxFunc::Poseidon2Permutation,
+            "Backend does not support multi-phase challenge derivation".into(),
+        ))
+    }
 }
 pub struct StubbedBlackBoxSolver;
 

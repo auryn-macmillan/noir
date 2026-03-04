@@ -146,6 +146,33 @@ pub enum Opcode<F: AcirField> {
         /// When the predicate evaluates to 1, execution proceeds.
         predicate: Expression<F>,
     },
+
+    /// Marks a phase boundary in a multi-phase circuit.
+    ///
+    /// When the ACVM reaches this opcode, it must:
+    /// 1. Pause execution
+    /// 2. Report the committed witness values to the backend
+    /// 3. Receive challenge value(s) derived from the backend's Fiat-Shamir transcript
+    /// 4. Write the challenges to `challenge_outputs`
+    /// 5. Resume execution
+    ///
+    /// All `commit_witnesses` must be resolved (assigned values) before this opcode is reached.
+    /// The `challenge_outputs` witnesses must NOT be assigned — they are written by the
+    /// resolution step.
+    PhaseBarrier {
+        /// Identifier for this phase transition. Supports multiple barriers per circuit
+        /// (e.g., for 3+ phase protocols). Must be sequential starting from 0.
+        phase_id: u32,
+
+        /// Witnesses whose values the backend should commit to before deriving the challenge.
+        /// These define the "transcript" for this phase transition.
+        commit_witnesses: Vec<Witness>,
+
+        /// Witnesses that receive the backend-derived challenge value(s).
+        /// Typically 1 element, but multiple are supported for protocols needing several
+        /// independent challenges from one commitment round.
+        challenge_outputs: Vec<Witness>,
+    },
 }
 
 impl<F: AcirField> std::fmt::Display for Opcode<F> {
@@ -217,6 +244,19 @@ pub(super) fn display_opcode<F: AcirField>(
             write!(f, "inputs: [{inputs}], ")?;
             write!(f, "outputs: [{outputs}]")
         }
+        Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+            let commits = commit_witnesses
+                .iter()
+                .map(|w| format!("{w}"))
+                .collect::<Vec<String>>()
+                .join(", ");
+            let outputs = challenge_outputs
+                .iter()
+                .map(|w| format!("{w}"))
+                .collect::<Vec<String>>()
+                .join(", ");
+            write!(f, "PHASE_BARRIER phase: {phase_id}, commits: [{commits}], outputs: [{outputs}]")
+        }
     }
 }
 
@@ -277,5 +317,19 @@ mod tests {
     fn display_zero() {
         let zero = Opcode::AssertZero(Expression::<FieldElement>::default());
         assert_eq!(zero.to_string(), "ASSERT 0 = 0");
+    }
+
+    #[test]
+    fn phase_barrier_display_snapshot() {
+        let phase_barrier: Opcode<FieldElement> = Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1), Witness(2), Witness(3)],
+            challenge_outputs: vec![Witness(4)],
+        };
+
+        insta::assert_snapshot!(
+            phase_barrier.to_string(),
+            @"PHASE_BARRIER phase: 0, commits: [w1, w2, w3], outputs: [w4]"
+        );
     }
 }
