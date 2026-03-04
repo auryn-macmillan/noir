@@ -285,6 +285,33 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> ProgramExecutor<'a, B> {
 
                         acvm.resolve_pending_foreign_call(result);
                     }
+                    ACVMStatus::RequiresPhaseChallenge(phase_info) => {
+                        let witness_values: Vec<_> = phase_info
+                            .committed_witnesses
+                            .iter()
+                            .map(|(_, v)| *v)
+                            .collect();
+
+                        match self.blackbox_solver.derive_phase_challenge(
+                            phase_info.phase_id,
+                            &witness_values,
+                            phase_info.challenge_outputs.len(),
+                        ) {
+                            Ok(challenges) => {
+                                acvm.resolve_pending_phase_challenge(challenges);
+                            }
+                            Err(error) => {
+                                return Err(JsExecutionError::new(
+                                    format!("Phase challenge derivation failed: {error}"),
+                                    None,
+                                    None,
+                                    Some(acir_function_id),
+                                    None,
+                                )
+                                .into());
+                            }
+                        }
+                    }
                     ACVMStatus::RequiresAcirCall(call_info) => {
                         let acir_to_call = &self.functions[call_info.id.as_usize()];
                         let initial_witness = call_info.initial_witness;

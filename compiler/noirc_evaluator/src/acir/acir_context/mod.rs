@@ -1474,6 +1474,50 @@ impl<F: AcirField> AcirContext<F> {
     ) -> AssertionPayload<F> {
         self.acir_ir.generate_assertion_message_payload(message)
     }
+
+    /// Emits a `PhaseBarrier` opcode that pauses ACVM execution for the backend
+    /// to commit to the given witness values and derive challenge(s).
+    ///
+    /// `commit_vars` are the AcirVars whose witness values the backend should commit to.
+    /// `num_challenges` is the number of independent challenge witnesses to allocate.
+    /// `phase_id` is the sequential phase identifier (starting from 0).
+    ///
+    /// Returns a vector of fresh AcirVars backed by witnesses that will receive
+    /// the backend-derived challenge values at runtime.
+    pub(crate) fn phase_barrier(
+        &mut self,
+        commit_vars: Vec<AcirVar>,
+        num_challenges: usize,
+        phase_id: u32,
+    ) -> Result<Vec<AcirVar>, InternalError> {
+        // Convert commit vars to witnesses
+        let commit_witnesses: Vec<Witness> = commit_vars
+            .into_iter()
+            .map(|var| self.var_to_witness(var))
+            .collect::<Result<_, _>>()?;
+
+        // Allocate fresh witnesses for the challenge outputs
+        let challenge_witnesses: Vec<Witness> =
+            (0..num_challenges).map(|_| self.acir_ir.next_witness_index()).collect();
+
+        // Create AcirVars backed by the new witnesses
+        let challenge_vars: Vec<AcirVar> = challenge_witnesses
+            .iter()
+            .map(|w| self.add_data(AcirVarData::Witness(*w)))
+            .collect();
+
+        // Emit the PhaseBarrier opcode
+        self.acir_ir.push_opcode(Opcode::PhaseBarrier {
+            phase_id,
+            commit_witnesses,
+            challenge_outputs: challenge_witnesses,
+        });
+
+        // Track the phase in GeneratedAcir
+        self.acir_ir.record_phase_barrier();
+
+        Ok(challenge_vars)
+    }
 }
 
 /// Returns an `F` representing the value `2**power`

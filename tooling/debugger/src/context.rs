@@ -741,6 +741,33 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> DebugContext<'a, B> {
                 ExecutionError::SolvingError(error, None),
             )),
             ACVMStatus::RequiresForeignCall(foreign_call) => self.handle_foreign_call(foreign_call),
+            ACVMStatus::RequiresPhaseChallenge(phase_info) => {
+                let witness_values: Vec<FieldElement> = phase_info
+                    .committed_witnesses
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .collect();
+
+                match self.backend.derive_phase_challenge(
+                    phase_info.phase_id,
+                    &witness_values,
+                    phase_info.challenge_outputs.len(),
+                ) {
+                    Ok(challenges) => {
+                        self.acvm.resolve_pending_phase_challenge(challenges);
+                        DebugCommandResult::Ok
+                    }
+                    Err(error) => DebugCommandResult::Error(NargoError::ExecutionError(
+                        ExecutionError::SolvingError(
+                            acvm::pwg::OpcodeResolutionError::BlackBoxFunctionFailed(
+                                acvm::acir::BlackBoxFunc::Poseidon2Permutation,
+                                error.to_string(),
+                            ),
+                            None,
+                        ),
+                    )),
+                }
+            }
             ACVMStatus::RequiresAcirCall(call_info) => self.handle_acir_call(call_info),
         }
     }

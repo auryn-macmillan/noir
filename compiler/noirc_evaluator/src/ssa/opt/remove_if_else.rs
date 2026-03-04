@@ -483,7 +483,9 @@ impl Context {
             | Intrinsic::ToRadix(_)
             | Intrinsic::ArrayRefCount
             | Intrinsic::VectorRefCount
-            | Intrinsic::FieldLessThan => SizeChange::None,
+            | Intrinsic::FieldLessThan
+            | Intrinsic::PhaseChallenge
+            | Intrinsic::PhaseChallengeMulti => SizeChange::None,
         }
     }
 }

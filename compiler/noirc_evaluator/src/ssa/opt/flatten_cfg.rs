@@ -985,7 +985,9 @@ impl<'f> Context<'f> {
             | Intrinsic::DerivePedersenGenerators
             | Intrinsic::FieldLessThan
             | Intrinsic::ArrayRefCount
-            | Intrinsic::VectorRefCount => arguments,
+            | Intrinsic::VectorRefCount
+            | Intrinsic::PhaseChallenge
+            | Intrinsic::PhaseChallengeMulti => arguments,
         }
     }
 

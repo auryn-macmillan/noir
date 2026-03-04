@@ -481,6 +481,13 @@ impl<W: Write> Interpreter<'_, W> {
                 let rhs = self.lookup_field(args[1], "rhs of call to field less than")?;
                 Ok(vec![Value::bool(lhs < rhs)])
             }
+            Intrinsic::PhaseChallenge | Intrinsic::PhaseChallengeMulti => {
+                // Phase challenge intrinsics require backend interaction and cannot
+                // be evaluated in the SSA interpreter.
+                Err(InterpreterError::Internal(InternalError::UnexpectedInstruction {
+                    reason: "PhaseChallenge intrinsics require backend interaction and cannot be interpreted",
+                }))
+            }
             Intrinsic::ArrayRefCount | Intrinsic::VectorRefCount => {
                 // `vector_refcount` receives `[length, array]` as input. `array_refcount` gets just `[array]`
                 let idx = if matches!(intrinsic, Intrinsic::VectorRefCount) { 1 } else { 0 };

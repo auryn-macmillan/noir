@@ -47,6 +47,7 @@ fn format_acir_opcode_kind<F: AcirField>(opcode: &AcirOpcode<F>) -> String {
         AcirOpcode::MemoryInit { .. } => "memory::init".to_string(),
         AcirOpcode::BrilligCall { id, .. } => format!("brillig_call({id})"),
         AcirOpcode::Call { .. } => "acir_call".to_string(),
+        AcirOpcode::PhaseBarrier { .. } => "phase_barrier".to_string(),
     }
 }
 

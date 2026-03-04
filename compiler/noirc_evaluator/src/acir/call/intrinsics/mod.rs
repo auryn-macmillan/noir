@@ -157,6 +157,50 @@ impl Context<'_> {
             | Intrinsic::VectorRefCount => {
                 unreachable!("Expected {intrinsic} to have been removing during SSA optimizations")
             }
+            Intrinsic::PhaseChallenge => {
+                // arguments[0] is the array of Field witnesses to commit to.
+                // Result is a single Field challenge value.
+                let input_array = self.convert_value(arguments[0], dfg);
+                let commit_vars: Vec<_> = input_array
+                    .flatten()
+                    .into_iter()
+                    .map(|(var, _typ)| var)
+                    .collect();
+
+                let phase_id = self.acir_context.acir_ir.num_phases;
+                let challenge_vars =
+                    self.acir_context.phase_barrier(commit_vars, 1, phase_id)?;
+
+                Ok(vec![AcirValue::Var(challenge_vars[0], NumericType::NativeField)])
+            }
+            Intrinsic::PhaseChallengeMulti => {
+                // arguments[0] is the array of Field witnesses to commit to.
+                // Result is an array of Field challenge values; the size is
+                // determined by the result type.
+                let input_array = self.convert_value(arguments[0], dfg);
+                let commit_vars: Vec<_> = input_array
+                    .flatten()
+                    .into_iter()
+                    .map(|(var, _typ)| var)
+                    .collect();
+
+                let Type::Array(_, num_challenges) = dfg.type_of_value(result_ids[0]) else {
+                    unreachable!(
+                        "ICE: PhaseChallengeMulti result must be an array"
+                    );
+                };
+                let num_challenges = num_challenges.0 as usize;
+
+                let phase_id = self.acir_context.acir_ir.num_phases;
+                let challenge_vars =
+                    self.acir_context.phase_barrier(commit_vars, num_challenges, phase_id)?;
+
+                let acir_values: im::Vector<AcirValue> = challenge_vars
+                    .into_iter()
+                    .map(|var| AcirValue::Var(var, NumericType::NativeField))
+                    .collect();
+                Ok(vec![AcirValue::Array(acir_values)])
+            }
         }
     }
 }

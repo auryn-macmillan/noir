@@ -338,6 +338,11 @@ impl<Registers: RegisterAllocator> BrilligBlock<'_, Registers> {
                     Intrinsic::DerivePedersenGenerators => {
                         unreachable!("unsupported function call type {:?}", dfg[func])
                     }
+                    Intrinsic::PhaseChallenge | Intrinsic::PhaseChallengeMulti => {
+                        unreachable!(
+                            "ICE: PhaseChallenge intrinsics cannot be used in unconstrained (Brillig) context"
+                        )
+                    }
                     Intrinsic::IsUnconstrained
                     | Intrinsic::ArrayLen
                     | Intrinsic::ArrayAsStrUnchecked

@@ -135,6 +135,16 @@ pub enum Intrinsic {
     /// result: reference count of `vector`. In unconstrained context, the reference count is stored alongside the vector.
     /// in constrained context, it will be 0.
     VectorRefCount,
+    /// PhaseChallenge - Derives a Fiat-Shamir challenge from backend-committed witnesses.
+    /// argument: array of Field elements to commit to
+    /// result: a single Field challenge derived by the backend's polynomial commitment + Fiat-Shamir transcript.
+    /// This intrinsic emits a PhaseBarrier opcode that pauses ACVM execution, allowing the backend
+    /// to commit to the specified witnesses and derive a challenge deterministically.
+    PhaseChallenge,
+    /// PhaseChallengeMulti - Like PhaseChallenge but derives multiple independent challenges.
+    /// argument: array of Field elements to commit to
+    /// result: an array of Field challenges derived by the backend.
+    PhaseChallengeMulti,
 }
 
 impl std::fmt::Display for Intrinsic {
@@ -165,6 +175,8 @@ impl std::fmt::Display for Intrinsic {
             Intrinsic::FieldLessThan => write!(f, "field_less_than"),
             Intrinsic::ArrayRefCount => write!(f, "array_refcount"),
             Intrinsic::VectorRefCount => write!(f, "vector_refcount"),
+            Intrinsic::PhaseChallenge => write!(f, "phase_challenge"),
+            Intrinsic::PhaseChallengeMulti => write!(f, "phase_challenge_multi"),
         }
     }
 }
@@ -185,7 +197,9 @@ impl Intrinsic {
             // on hidden variables on otherwise identical array values.
             | Intrinsic::ArrayRefCount
             | Intrinsic::VectorRefCount
-            | Intrinsic::AsWitness => true,
+            | Intrinsic::AsWitness
+            | Intrinsic::PhaseChallenge
+            | Intrinsic::PhaseChallengeMulti => true,
 
             // These apply a constraint that the input must fit into a specified number of limbs.
             Intrinsic::ToBits(_) | Intrinsic::ToRadix(_) => true,
@@ -286,6 +300,8 @@ impl Intrinsic {
             "black_box" => Some(Intrinsic::Hint(Hint::BlackBox)),
             "array_refcount" => Some(Intrinsic::ArrayRefCount),
             "vector_refcount" => Some(Intrinsic::VectorRefCount),
+            "phase_challenge" => Some(Intrinsic::PhaseChallenge),
+            "phase_challenge_multi" => Some(Intrinsic::PhaseChallengeMulti),
 
             other => BlackBoxFunc::lookup(other).map(Intrinsic::BlackBox),
         }

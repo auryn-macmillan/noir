@@ -176,6 +176,34 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>, E: ForeignCallExecutor<F>>
                         }
                     }
                 }
+                ACVMStatus::RequiresPhaseChallenge(phase_info) => {
+                    let witness_values: Vec<F> = phase_info
+                        .committed_witnesses
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .collect();
+
+                    match self.blackbox_solver.derive_phase_challenge(
+                        phase_info.phase_id,
+                        &witness_values,
+                        phase_info.challenge_outputs.len(),
+                    ) {
+                        Ok(challenges) => {
+                            acvm.resolve_pending_phase_challenge(challenges);
+                        }
+                        Err(error) => {
+                            return Err(NargoError::ExecutionError(
+                                ExecutionError::SolvingError(
+                                    OpcodeResolutionError::BlackBoxFunctionFailed(
+                                        acvm::acir::BlackBoxFunc::Poseidon2Permutation,
+                                        error.to_string(),
+                                    ),
+                                    None,
+                                ),
+                            ));
+                        }
+                    }
+                }
                 ACVMStatus::RequiresAcirCall(call_info) => {
                     // Store the parent function index whose context we are currently executing
                     let acir_function_caller = self.current_function_index;
@@ -407,6 +435,7 @@ mod test {
             public_parameters: PublicInputs::default(),
             return_values: PublicInputs::default(),
             assert_messages: Vec::new(),
+            num_phases: 0,
         }];
         let unconstrained_function = [BrilligBytecode {
             function_name: "oracle_wrapper".to_string(),

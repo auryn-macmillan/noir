@@ -374,6 +374,8 @@ pub(super) fn simplify_call(
                 SimplifyResult::None
             }
         }
+        // Phase challenges cannot be simplified — they require backend interaction at runtime.
+        Intrinsic::PhaseChallenge | Intrinsic::PhaseChallengeMulti => SimplifyResult::None,
     };
 
     if let (Some(expected_types), SimplifyResult::SimplifiedTo(result)) =

@@ -85,6 +85,10 @@ pub struct GeneratedAcir<F: AcirField> {
     /// This maps allows a profiler to determine which Brillig opcodes
     /// originated from a reusable procedure.
     pub brillig_procedure_locs: BTreeMap<BrilligFunctionId, BrilligProcedureRangeMap>,
+
+    /// Number of phase barriers emitted. Each PhaseBarrier opcode increments this.
+    /// Used to populate `Circuit::num_phases` in the final circuit.
+    pub num_phases: u32,
 }
 
 /// Correspondence between an opcode index (in opcodes) and the source code call stack which generated it
@@ -106,6 +110,12 @@ impl<F: AcirField> GeneratedAcir<F> {
         if !self.call_stack_id.is_root() {
             self.location_map.insert(self.last_acir_opcode_location(), self.call_stack_id);
         }
+    }
+
+    /// Records that a phase barrier has been emitted.
+    /// Increments the `num_phases` counter used when building the final `Circuit`.
+    pub(crate) fn record_phase_barrier(&mut self) {
+        self.num_phases += 1;
     }
 
     /// Initializes memory block with given values.

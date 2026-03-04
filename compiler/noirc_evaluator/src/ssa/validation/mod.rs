@@ -635,6 +635,23 @@ impl<'f> Validator<'f> {
             Intrinsic::BlackBox(blackbox) => {
                 self.type_check_black_box(instruction, arguments, blackbox);
             }
+            Intrinsic::PhaseChallenge => {
+                // fn challenge<let N: u32>(witnesses: [Field; N]) -> Field {}
+                let argument_type = self.assert_one_argument(arguments, "PhaseChallenge");
+                assert_field_array(&argument_type, "PhaseChallenge witnesses");
+
+                let result_type = self.assert_one_result(instruction, "PhaseChallenge");
+                assert_field(&result_type, "PhaseChallenge result");
+            }
+            Intrinsic::PhaseChallengeMulti => {
+                // fn challenge_multi<let N: u32, let M: u32>(witnesses: [Field; N]) -> [Field; M] {}
+                let argument_type = self.assert_one_argument(arguments, "PhaseChallengeMulti");
+                assert_field_array(&argument_type, "PhaseChallengeMulti witnesses");
+
+                let result_type =
+                    self.assert_one_result(instruction, "PhaseChallengeMulti");
+                assert_field_array(&result_type, "PhaseChallengeMulti result");
+            }
         }
     }
 

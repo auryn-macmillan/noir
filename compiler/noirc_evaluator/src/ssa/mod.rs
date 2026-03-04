@@ -524,6 +524,7 @@ pub fn convert_generated_acir_into_circuit(
         warnings,
         name,
         brillig_procedure_locs,
+        num_phases,
         ..
     } = generated_acir;
 
@@ -543,6 +544,7 @@ pub fn convert_generated_acir_into_circuit(
         public_parameters,
         return_values,
         assert_messages: assert_messages.into_iter().collect(),
+        num_phases,
     };
     let acir_location_map: BTreeMap<AcirOpcodeLocation, CallStackId> = location_map
         .iter()

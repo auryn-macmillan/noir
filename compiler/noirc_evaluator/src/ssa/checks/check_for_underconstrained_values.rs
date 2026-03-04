@@ -514,7 +514,9 @@ impl DependencyContext {
                                 | Intrinsic::StrAsBytes
                                 | Intrinsic::ToBits(..)
                                 | Intrinsic::ToRadix(..)
-                                | Intrinsic::FieldLessThan => {
+                                | Intrinsic::FieldLessThan
+                                | Intrinsic::PhaseChallenge
+                                | Intrinsic::PhaseChallengeMulti => {
                                     // Record all the function arguments as parents of the results
                                     self.update_children(&arguments, &results);
                                 }
@@ -828,7 +830,9 @@ impl Context {
                             | Intrinsic::StrAsBytes
                             | Intrinsic::ToBits(..)
                             | Intrinsic::ToRadix(..)
-                            | Intrinsic::FieldLessThan => {
+                            | Intrinsic::FieldLessThan
+                            | Intrinsic::PhaseChallenge
+                            | Intrinsic::PhaseChallengeMulti => {
                                 self.value_sets.push(instruction_arguments_and_results);
                             }
                         },
