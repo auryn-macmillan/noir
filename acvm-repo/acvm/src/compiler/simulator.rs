@@ -418,4 +418,32 @@ mod tests {
         let empty_circuit = Circuit::from_str(src).unwrap();
         assert_eq!(CircuitSimulator::check_circuit(&empty_circuit), Some(1));
     }
+
+    #[test]
+    fn reports_none_for_phase_barrier_with_solvable_inputs() {
+        let src = "
+        private parameters: [w0, w1]
+        public parameters: []
+        return values: []
+        PHASE_BARRIER phase: 0, commits: [w0, w1], outputs: [w2]
+        ASSERT w3 = w2
+        ";
+        let circuit = Circuit::from_str(src).unwrap();
+        // PhaseBarrier makes w2 solvable (challenge injected by backend),
+        // so the subsequent ASSERT can solve w3 from w2
+        assert_eq!(CircuitSimulator::check_circuit(&circuit), None);
+    }
+
+    #[test]
+    fn reports_some_for_phase_barrier_with_unsolvable_commit() {
+        let src = "
+        private parameters: [w0]
+        public parameters: []
+        return values: []
+        PHASE_BARRIER phase: 0, commits: [w0, w1], outputs: [w2]
+        ";
+        let circuit = Circuit::from_str(src).unwrap();
+        // w1 is not a parameter and not derived — the barrier can't be solved
+        assert_eq!(CircuitSimulator::check_circuit(&circuit), Some(0));
+    }
 }

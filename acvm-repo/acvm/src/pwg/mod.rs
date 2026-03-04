@@ -326,6 +326,10 @@ pub struct ACVM<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> {
     brillig_branch_to_feature_map: Option<&'a BranchToFeatureMap>,
 
     brillig_fuzzing_trace: Option<Vec<u32>>,
+
+    /// Tracks the next expected phase_id for PhaseBarrier opcodes.
+    /// Phase barriers must appear in sequential order (0, 1, 2, ...).
+    next_phase_id: u32,
 }
 
 impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
@@ -354,6 +358,7 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
             brillig_fuzzing_active: false,
             brillig_branch_to_feature_map: None,
             brillig_fuzzing_trace: None,
+            next_phase_id: 0,
         }
     }
 
@@ -511,6 +516,7 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
         for (witness, value) in outputs.into_iter().zip(challenge_values) {
             insert_value(&witness, value, &mut self.witness_map)?;
         }
+        self.next_phase_id += 1;
         self.instruction_pointer += 1;
         if self.instruction_pointer == self.opcodes.len() {
             self.status(ACVMStatus::Solved);
@@ -575,6 +581,17 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
                 }
             }
             Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+                // Validate: phase_id must be sequential (0, 1, 2, ...)
+                if *phase_id != self.next_phase_id {
+                    return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                        phase_id: *phase_id,
+                        reason: format!(
+                            "Expected phase_id {}, got {}. Phase barriers must appear in sequential order.",
+                            self.next_phase_id, phase_id
+                        ),
+                    });
+                }
+
                 // Validate: challenge_outputs must not be empty (a barrier with no outputs is meaningless)
                 if challenge_outputs.is_empty() {
                     return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
@@ -1358,5 +1375,65 @@ mod tests {
         let result = acvm.resolve_pending_phase_challenge(vec![FieldElement::from(42u128)]);
         assert!(result.is_ok());
         assert_eq!(*acvm.get_status(), ACVMStatus::Solved);
+    }
+
+    #[test]
+    fn phase_barrier_rejects_non_sequential_phase_id() {
+        // Phase barriers must have sequential phase_ids starting from 0.
+        // A circuit that starts with phase_id 1 (skipping 0) should fail.
+        let initial_witness =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(10u128))]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 1, commits: [w1], outputs: [w2]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+        let status = acvm.solve();
+        assert!(
+            matches!(
+                status,
+                ACVMStatus::Failure(OpcodeResolutionError::PhaseChallengeDerivationFailed { .. })
+            ),
+            "Expected failure due to non-sequential phase_id, got: {status}"
+        );
+    }
+
+    #[test]
+    fn phase_barrier_accepts_sequential_phase_ids() {
+        // Two barriers with phase_id 0 and 1 should both succeed.
+        let initial_witness = WitnessMap::from(BTreeMap::from_iter([
+            (Witness(1), FieldElement::from(10u128)),
+            (Witness(2), FieldElement::from(20u128)),
+        ]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 0, commits: [w1], outputs: [w3]
+        PHASE_BARRIER phase: 1, commits: [w2], outputs: [w4]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+
+        // First barrier (phase 0)
+        let status = acvm.solve();
+        assert!(
+            matches!(status, ACVMStatus::RequiresPhaseChallenge(ref info) if info.phase_id == 0)
+        );
+        acvm.resolve_pending_phase_challenge(vec![FieldElement::from(100u128)]).unwrap();
+
+        // Second barrier (phase 1)
+        let status = acvm.solve();
+        assert!(
+            matches!(status, ACVMStatus::RequiresPhaseChallenge(ref info) if info.phase_id == 1)
+        );
+        acvm.resolve_pending_phase_challenge(vec![FieldElement::from(200u128)]).unwrap();
+
+        assert_eq!(*acvm.get_status(), ACVMStatus::Solved);
+        assert_eq!(acvm.witness_map()[&Witness(3)], FieldElement::from(100u128));
+        assert_eq!(acvm.witness_map()[&Witness(4)], FieldElement::from(200u128));
     }
 }

@@ -402,18 +402,65 @@ pub fn validate_witness<F: AcirField>(
                     }
                 }
             }
-            Opcode::PhaseBarrier { phase_id: _, commit_witnesses, challenge_outputs } => {
-                // Verify all committed witnesses have assigned values
+            Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+                // Validate structural invariants
+                if challenge_outputs.is_empty() {
+                    return Err(unsatisfied_constraint(
+                        opcode_index,
+                        "PhaseBarrier has no challenge outputs".to_string(),
+                    ));
+                }
+                let commit_set: std::collections::BTreeSet<_> = commit_witnesses.iter().collect();
+                for out in challenge_outputs.iter() {
+                    if commit_set.contains(out) {
+                        return Err(unsatisfied_constraint(
+                            opcode_index,
+                            format!(
+                                "PhaseBarrier challenge output witness {} overlaps with commit witnesses",
+                                out.0
+                            ),
+                        ));
+                    }
+                }
+
+                // Verify all committed witnesses have assigned values and collect them
+                let mut committed_values = Vec::with_capacity(commit_witnesses.len());
                 for w in commit_witnesses {
+                    let val = witness_value(w, &witness_map)?;
+                    committed_values.push(val);
+                }
+
+                // Verify challenge output witnesses have assigned values
+                // (they should have been injected by the backend)
+                for w in challenge_outputs.iter() {
                     if witness_map.get(w).is_none() {
                         return Err(OpcodeNotSolvable::MissingAssignment(w.0).into());
                     }
                 }
-                // Verify challenge output witnesses have assigned values
-                // (they should have been injected by the backend)
-                for w in challenge_outputs {
-                    if witness_map.get(w).is_none() {
-                        return Err(OpcodeNotSolvable::MissingAssignment(w.0).into());
+
+                // Verify the challenge values match what the backend would derive.
+                // If the backend doesn't support multi-phase (returns an error),
+                // we skip this check — the values were injected during execution
+                // and we can only verify structural correctness.
+                if let Ok(expected_challenges) = backend.derive_phase_challenge(
+                    *phase_id,
+                    &committed_values,
+                    challenge_outputs.len(),
+                ) {
+                    for (i, (output_witness, expected)) in
+                        challenge_outputs.iter().zip(expected_challenges.iter()).enumerate()
+                    {
+                        let actual = witness_value(output_witness, &witness_map)?;
+                        if actual != *expected {
+                            return Err(unsatisfied_constraint(
+                                opcode_index,
+                                format!(
+                                    "PhaseBarrier challenge output {} (witness {}) mismatch: \
+                                     expected {expected} but found {actual}",
+                                    i, output_witness.0
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -897,5 +944,93 @@ mod tests {
 
         let backend = Bn254BlackBoxSolver;
         assert!(validate_witness(&backend, witness_map, &circuit).is_ok());
+    }
+
+    #[test]
+    fn test_phase_barrier_valid() {
+        // PhaseBarrier with committed witnesses w1, w2 and challenge output w3
+        let circuit = make_circuit(vec![Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1), Witness(2)],
+            challenge_outputs: vec![Witness(3)],
+        }]);
+
+        let witness_map = WitnessMap::from(BTreeMap::from_iter([
+            (Witness(1), FieldElement::from(10u128)),
+            (Witness(2), FieldElement::from(20u128)),
+            (Witness(3), FieldElement::from(42u128)), // challenge injected by backend
+        ]));
+
+        // StubbedBlackBoxSolver's derive_phase_challenge returns an error (unsupported),
+        // so the validator skips the challenge value check and only checks structural validity.
+        let backend = Bn254BlackBoxSolver;
+        assert!(validate_witness(&backend, witness_map, &circuit).is_ok());
+    }
+
+    #[test]
+    fn test_phase_barrier_missing_commit_witness() {
+        let circuit = make_circuit(vec![Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1), Witness(2)],
+            challenge_outputs: vec![Witness(3)],
+        }]);
+
+        // Missing Witness(2)
+        let witness_map = WitnessMap::from(BTreeMap::from_iter([
+            (Witness(1), FieldElement::from(10u128)),
+            (Witness(3), FieldElement::from(42u128)),
+        ]));
+
+        let backend = Bn254BlackBoxSolver;
+        assert!(validate_witness(&backend, witness_map, &circuit).is_err());
+    }
+
+    #[test]
+    fn test_phase_barrier_missing_challenge_output() {
+        let circuit = make_circuit(vec![Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1)],
+            challenge_outputs: vec![Witness(2)],
+        }]);
+
+        // Witness(2) not assigned — challenge was never injected
+        let witness_map =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(10u128))]));
+
+        let backend = Bn254BlackBoxSolver;
+        assert!(validate_witness(&backend, witness_map, &circuit).is_err());
+    }
+
+    #[test]
+    fn test_phase_barrier_empty_challenge_outputs_rejected() {
+        let circuit = make_circuit(vec![Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1)],
+            challenge_outputs: vec![], // invalid: no outputs
+        }]);
+
+        let witness_map =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(10u128))]));
+
+        let backend = Bn254BlackBoxSolver;
+        let result = validate_witness(&backend, witness_map, &circuit);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_barrier_overlapping_witnesses_rejected() {
+        // Witness(1) appears in both commit and output
+        let circuit = make_circuit(vec![Opcode::PhaseBarrier {
+            phase_id: 0,
+            commit_witnesses: vec![Witness(1)],
+            challenge_outputs: vec![Witness(1)],
+        }]);
+
+        let witness_map =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(10u128))]));
+
+        let backend = Bn254BlackBoxSolver;
+        let result = validate_witness(&backend, witness_map, &circuit);
+        assert!(result.is_err());
     }
 }
