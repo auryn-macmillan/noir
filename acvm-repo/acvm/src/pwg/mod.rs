@@ -247,6 +247,8 @@ pub enum OpcodeResolutionError<F> {
     PredicateLargerThanOne { opcode_location: ErrorLocation, pred_value: F },
     #[error("(--pedantic): Memory operations are expected to be 0 or 1, but found: {operation}")]
     MemoryOperationLargerThanOne { opcode_location: ErrorLocation, operation: F },
+    #[error("Failed to derive phase challenge (phase {phase_id}): {reason}")]
+    PhaseChallengeDerivationFailed { phase_id: u32, reason: String },
 }
 
 impl<F> From<BlackBoxResolutionError> for OpcodeResolutionError<F> {
@@ -462,10 +464,7 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
     /// Sets the status of the VM to `RequiresPhaseChallenge`.
     /// Indicating that the VM has reached a phase barrier and is waiting for the
     /// backend to commit to witnesses and derive challenge value(s).
-    fn wait_for_phase_challenge(
-        &mut self,
-        phase_info: PhaseBarrierWaitInfo<F>,
-    ) -> ACVMStatus<F> {
+    fn wait_for_phase_challenge(&mut self, phase_info: PhaseBarrierWaitInfo<F>) -> ACVMStatus<F> {
         self.status(ACVMStatus::RequiresPhaseChallenge(phase_info))
     }
 
@@ -491,7 +490,13 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
     ///
     /// The caller must provide exactly one challenge value per `challenge_output` witness
     /// specified in the [`PhaseBarrierWaitInfo`].
-    pub fn resolve_pending_phase_challenge(&mut self, challenge_values: Vec<F>) {
+    ///
+    /// Returns an error if a challenge output witness already has a different value assigned
+    /// (which would indicate a bug in circuit generation or a malicious backend).
+    pub fn resolve_pending_phase_challenge(
+        &mut self,
+        challenge_values: Vec<F>,
+    ) -> Result<(), OpcodeResolutionError<F>> {
         let ACVMStatus::RequiresPhaseChallenge(ref info) = self.status else {
             panic!("ACVM is not waiting on a phase challenge");
         };
@@ -504,10 +509,15 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
         );
         let outputs = info.challenge_outputs.clone();
         for (witness, value) in outputs.into_iter().zip(challenge_values) {
-            self.witness_map.insert(witness, value);
+            insert_value(&witness, value, &mut self.witness_map)?;
         }
         self.instruction_pointer += 1;
-        self.status(ACVMStatus::InProgress);
+        if self.instruction_pointer == self.opcodes.len() {
+            self.status(ACVMStatus::Solved);
+        } else {
+            self.status(ACVMStatus::InProgress);
+        }
+        Ok(())
     }
 
     /// Executes the ACVM's circuit until execution halts.
@@ -565,15 +575,36 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
                 }
             }
             Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+                // Validate: challenge_outputs must not be empty (a barrier with no outputs is meaningless)
+                if challenge_outputs.is_empty() {
+                    return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                        phase_id: *phase_id,
+                        reason: "PhaseBarrier has no challenge outputs".into(),
+                    });
+                }
+
+                // Validate: challenge_outputs must not overlap with commit_witnesses
+                // (otherwise injecting the challenge would overwrite committed data)
+                let commit_set: std::collections::BTreeSet<_> = commit_witnesses.iter().collect();
+                for out in challenge_outputs {
+                    if commit_set.contains(out) {
+                        return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                            phase_id: *phase_id,
+                            reason: format!(
+                                "Challenge output witness {} overlaps with commit witnesses",
+                                out.0
+                            ),
+                        });
+                    }
+                }
+
                 // Verify all commit_witnesses are resolved and collect their values
                 let mut committed = Vec::with_capacity(commit_witnesses.len());
                 for w in commit_witnesses {
                     match self.witness_map.get(w) {
                         Some(val) => committed.push((*w, *val)),
                         None => {
-                            return self.fail(
-                                OpcodeNotSolvable::MissingAssignment(w.0).into(),
-                            );
+                            return self.fail(OpcodeNotSolvable::MissingAssignment(w.0).into());
                         }
                     }
                 }
@@ -1101,7 +1132,7 @@ mod tests {
 
         // Inject challenge value (w3 = 42)
         let challenge = FieldElement::from(42u128);
-        acvm.resolve_pending_phase_challenge(vec![challenge]);
+        acvm.resolve_pending_phase_challenge(vec![challenge]).unwrap();
 
         // Resume solving — should complete
         let status = acvm.solve();
@@ -1160,7 +1191,8 @@ mod tests {
         acvm.resolve_pending_phase_challenge(vec![
             FieldElement::from(100u128),
             FieldElement::from(200u128),
-        ]);
+        ])
+        .unwrap();
 
         let status = acvm.solve();
         assert_eq!(status, ACVMStatus::Solved);
@@ -1200,7 +1232,7 @@ mod tests {
         }
 
         // Inject challenge w4 = 5
-        acvm.resolve_pending_phase_challenge(vec![FieldElement::from(5u128)]);
+        acvm.resolve_pending_phase_challenge(vec![FieldElement::from(5u128)]).unwrap();
 
         // Solve Phase 2
         let status = acvm.solve();
@@ -1212,9 +1244,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "Challenge value count mismatch")]
     fn phase_barrier_panics_on_wrong_challenge_count() {
-        let initial_witness = WitnessMap::from(BTreeMap::from_iter([
-            (Witness(1), FieldElement::from(1u128)),
-        ]));
+        let initial_witness =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(1u128))]));
         let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
 
         let src = "
@@ -1226,9 +1257,106 @@ mod tests {
         let _ = acvm.solve();
 
         // Provide 2 values for 1 output — should panic
-        acvm.resolve_pending_phase_challenge(vec![
+        let _ = acvm.resolve_pending_phase_challenge(vec![
             FieldElement::from(1u128),
             FieldElement::from(2u128),
         ]);
+    }
+
+    #[test]
+    fn phase_barrier_as_last_opcode_solves() {
+        // PhaseBarrier is the only (and thus last) opcode — after resolving,
+        // the ACVM should transition to Solved, not panic with index out-of-bounds.
+        let initial_witness =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(99u128))]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 0, commits: [w1], outputs: [w2]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+        let status = acvm.solve();
+        assert!(matches!(status, ACVMStatus::RequiresPhaseChallenge(_)));
+
+        acvm.resolve_pending_phase_challenge(vec![FieldElement::from(123u128)]).unwrap();
+
+        // Should be Solved since there are no more opcodes
+        assert_eq!(*acvm.get_status(), ACVMStatus::Solved);
+        assert_eq!(acvm.witness_map()[&Witness(2)], FieldElement::from(123u128));
+    }
+
+    #[test]
+    fn phase_barrier_rejects_overlapping_witnesses() {
+        // w1 appears in both commit_witnesses and challenge_outputs — should fail
+        let initial_witness =
+            WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(5u128))]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 0, commits: [w1], outputs: [w1]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+        let status = acvm.solve();
+        assert!(
+            matches!(
+                status,
+                ACVMStatus::Failure(OpcodeResolutionError::PhaseChallengeDerivationFailed { .. })
+            ),
+            "Expected failure due to overlapping witnesses, got: {status}"
+        );
+    }
+
+    #[test]
+    fn phase_barrier_rejects_duplicate_challenge_value() {
+        // If the challenge output witness already has a different value, resolution should error.
+        let initial_witness = WitnessMap::from(BTreeMap::from_iter([
+            (Witness(1), FieldElement::from(10u128)),
+            (Witness(2), FieldElement::from(42u128)), // pre-assigned!
+        ]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 0, commits: [w1], outputs: [w2]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+        let status = acvm.solve();
+        assert!(matches!(status, ACVMStatus::RequiresPhaseChallenge(_)));
+
+        // Try to inject a different value for w2 (already has 42, injecting 99)
+        let result = acvm.resolve_pending_phase_challenge(vec![FieldElement::from(99u128)]);
+        assert!(
+            matches!(result, Err(OpcodeResolutionError::UnsatisfiedConstrain { .. })),
+            "Expected UnsatisfiedConstrain error on conflicting witness, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn phase_barrier_allows_same_challenge_value() {
+        // If the challenge output witness already has the same value, resolution should succeed.
+        let initial_witness = WitnessMap::from(BTreeMap::from_iter([
+            (Witness(1), FieldElement::from(10u128)),
+            (Witness(2), FieldElement::from(42u128)), // pre-assigned with same value
+        ]));
+        let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
+
+        let src = "
+        PHASE_BARRIER phase: 0, commits: [w1], outputs: [w2]
+        ";
+        let opcodes = parse_opcodes(src).unwrap();
+
+        let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
+        let status = acvm.solve();
+        assert!(matches!(status, ACVMStatus::RequiresPhaseChallenge(_)));
+
+        // Inject same value — should succeed
+        let result = acvm.resolve_pending_phase_challenge(vec![FieldElement::from(42u128)]);
+        assert!(result.is_ok());
+        assert_eq!(*acvm.get_status(), ACVMStatus::Solved);
     }
 }

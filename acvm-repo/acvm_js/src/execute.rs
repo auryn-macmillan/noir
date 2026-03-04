@@ -11,6 +11,7 @@ use acvm::{
 use bn254_blackbox_solver::Bn254BlackBoxSolver;
 
 use js_sys::Error;
+use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::{
@@ -286,11 +287,8 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> ProgramExecutor<'a, B> {
                         acvm.resolve_pending_foreign_call(result);
                     }
                     ACVMStatus::RequiresPhaseChallenge(phase_info) => {
-                        let witness_values: Vec<_> = phase_info
-                            .committed_witnesses
-                            .iter()
-                            .map(|(_, v)| *v)
-                            .collect();
+                        let witness_values: Vec<_> =
+                            phase_info.committed_witnesses.iter().map(|(_, v)| *v).collect();
 
                         match self.blackbox_solver.derive_phase_challenge(
                             phase_info.phase_id,
@@ -298,7 +296,17 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> ProgramExecutor<'a, B> {
                             phase_info.challenge_outputs.len(),
                         ) {
                             Ok(challenges) => {
-                                acvm.resolve_pending_phase_challenge(challenges);
+                                acvm.resolve_pending_phase_challenge(challenges).map_err(|e| {
+                                    let js_err: JsValue = JsExecutionError::new(
+                                        format!("Phase challenge resolution failed: {e}"),
+                                        None,
+                                        None,
+                                        Some(acir_function_id),
+                                        None,
+                                    )
+                                    .into();
+                                    js_err
+                                })?;
                             }
                             Err(error) => {
                                 return Err(JsExecutionError::new(

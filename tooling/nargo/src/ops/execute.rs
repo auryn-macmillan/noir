@@ -177,11 +177,8 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>, E: ForeignCallExecutor<F>>
                     }
                 }
                 ACVMStatus::RequiresPhaseChallenge(phase_info) => {
-                    let witness_values: Vec<F> = phase_info
-                        .committed_witnesses
-                        .iter()
-                        .map(|(_, v)| *v)
-                        .collect();
+                    let witness_values: Vec<F> =
+                        phase_info.committed_witnesses.iter().map(|(_, v)| *v).collect();
 
                     match self.blackbox_solver.derive_phase_challenge(
                         phase_info.phase_id,
@@ -189,18 +186,26 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>, E: ForeignCallExecutor<F>>
                         phase_info.challenge_outputs.len(),
                     ) {
                         Ok(challenges) => {
-                            acvm.resolve_pending_phase_challenge(challenges);
+                            if let Err(error) = acvm.resolve_pending_phase_challenge(challenges) {
+                                if self.return_witness_on_failure {
+                                    self.failing_partial_witness = Some(acvm.witness_map().clone());
+                                }
+                                return Err(NargoError::ExecutionError(
+                                    ExecutionError::SolvingError(error, None),
+                                ));
+                            }
                         }
                         Err(error) => {
-                            return Err(NargoError::ExecutionError(
-                                ExecutionError::SolvingError(
-                                    OpcodeResolutionError::BlackBoxFunctionFailed(
-                                        acvm::acir::BlackBoxFunc::Poseidon2Permutation,
-                                        error.to_string(),
-                                    ),
-                                    None,
-                                ),
-                            ));
+                            if self.return_witness_on_failure {
+                                self.failing_partial_witness = Some(acvm.witness_map().clone());
+                            }
+                            return Err(NargoError::ExecutionError(ExecutionError::SolvingError(
+                                OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                                    phase_id: phase_info.phase_id,
+                                    reason: error.to_string(),
+                                },
+                                None,
+                            )));
                         }
                     }
                 }

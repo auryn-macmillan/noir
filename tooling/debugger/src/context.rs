@@ -742,11 +742,8 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> DebugContext<'a, B> {
             )),
             ACVMStatus::RequiresForeignCall(foreign_call) => self.handle_foreign_call(foreign_call),
             ACVMStatus::RequiresPhaseChallenge(phase_info) => {
-                let witness_values: Vec<FieldElement> = phase_info
-                    .committed_witnesses
-                    .iter()
-                    .map(|(_, v)| *v)
-                    .collect();
+                let witness_values: Vec<FieldElement> =
+                    phase_info.committed_witnesses.iter().map(|(_, v)| *v).collect();
 
                 match self.backend.derive_phase_challenge(
                     phase_info.phase_id,
@@ -754,15 +751,30 @@ impl<'a, B: BlackBoxFunctionSolver<FieldElement>> DebugContext<'a, B> {
                     phase_info.challenge_outputs.len(),
                 ) {
                     Ok(challenges) => {
-                        self.acvm.resolve_pending_phase_challenge(challenges);
-                        DebugCommandResult::Ok
+                        match self.acvm.resolve_pending_phase_challenge(challenges) {
+                            Ok(()) => {
+                                // Check if the next opcode has a breakpoint, matching
+                                // the pattern used for other resolved operations.
+                                if self.breakpoint_reached() {
+                                    DebugCommandResult::BreakpointReached(
+                                        self.get_current_debug_location()
+                                            .expect("Breakpoint reached but we have no location"),
+                                    )
+                                } else {
+                                    DebugCommandResult::Ok
+                                }
+                            }
+                            Err(error) => DebugCommandResult::Error(NargoError::ExecutionError(
+                                ExecutionError::SolvingError(error, None),
+                            )),
+                        }
                     }
                     Err(error) => DebugCommandResult::Error(NargoError::ExecutionError(
                         ExecutionError::SolvingError(
-                            acvm::pwg::OpcodeResolutionError::BlackBoxFunctionFailed(
-                                acvm::acir::BlackBoxFunc::Poseidon2Permutation,
-                                error.to_string(),
-                            ),
+                            acvm::pwg::OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                                phase_id: phase_info.phase_id,
+                                reason: error.to_string(),
+                            },
                             None,
                         ),
                     )),
