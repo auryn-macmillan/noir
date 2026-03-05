@@ -505,13 +505,17 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
         let ACVMStatus::RequiresPhaseChallenge(ref info) = self.status else {
             panic!("ACVM is not waiting on a phase challenge");
         };
-        assert_eq!(
-            challenge_values.len(),
-            info.challenge_outputs.len(),
-            "Challenge value count mismatch: expected {}, got {}",
-            info.challenge_outputs.len(),
-            challenge_values.len(),
-        );
+        if challenge_values.len() != info.challenge_outputs.len() {
+            let phase_id = info.phase_id;
+            return Err(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                phase_id,
+                reason: format!(
+                    "Challenge value count mismatch: expected {}, got {}",
+                    info.challenge_outputs.len(),
+                    challenge_values.len(),
+                ),
+            });
+        }
         let outputs = info.challenge_outputs.clone();
         for (witness, value) in outputs.into_iter().zip(challenge_values) {
             insert_value(&witness, value, &mut self.witness_map)?;
@@ -1259,8 +1263,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Challenge value count mismatch")]
-    fn phase_barrier_panics_on_wrong_challenge_count() {
+    fn phase_barrier_errors_on_wrong_challenge_count() {
         let initial_witness =
             WitnessMap::from(BTreeMap::from_iter([(Witness(1), FieldElement::from(1u128))]));
         let backend = acvm_blackbox_solver::StubbedBlackBoxSolver;
@@ -1273,11 +1276,17 @@ mod tests {
         let mut acvm = ACVM::new(&backend, &opcodes, initial_witness, &[], &[]);
         let _ = acvm.solve();
 
-        // Provide 2 values for 1 output — should panic
-        let _ = acvm.resolve_pending_phase_challenge(vec![
+        // Provide 2 values for 1 output — should return an error
+        let result = acvm.resolve_pending_phase_challenge(vec![
             FieldElement::from(1u128),
             FieldElement::from(2u128),
         ]);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Challenge value count mismatch"),
+            "Expected 'Challenge value count mismatch' in error, got: {err_msg}"
+        );
     }
 
     #[test]

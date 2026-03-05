@@ -43,8 +43,10 @@ const NUM_LIMB_BITS: u32 = 136;
 /// 2^16 = 65536 points * 64 bytes = 4MB — reasonable for most circuits.
 const SRS_CACHE_MAX_POINTS: usize = 1 << 16;
 
-/// Global SRS cache. Loaded once on first use and reused across all calls.
-static SRS_CACHE: OnceLock<SrsCache> = OnceLock::new();
+/// Global SRS cache. Loaded once on first successful use and reused across all calls.
+/// Stores `Result` so that initialization errors are preserved and callers get the
+/// real error message (not a misleading "SRS has 0 points" sentinel).
+static SRS_CACHE: OnceLock<Result<SrsCache, String>> = OnceLock::new();
 
 /// Cached SRS data: pre-parsed G1 affine points and the file path for overflow.
 struct SrsCache {
@@ -144,14 +146,11 @@ fn init_srs_cache() -> Result<SrsCache, BlackBoxResolutionError> {
 /// Load SRS points, using the global cache for the first SRS_CACHE_MAX_POINTS
 /// and reading additional points from disk on demand.
 fn load_srs_cached(num_points: usize) -> Result<Vec<G1Affine>, BlackBoxResolutionError> {
-    let cache = SRS_CACHE.get_or_init(|| {
-        init_srs_cache().unwrap_or_else(|e| {
-            // OnceLock requires a value, not a Result. Store an empty cache
-            // and let the caller detect the insufficient points.
-            eprintln!("Warning: SRS cache initialization failed: {}", e);
-            SrsCache { points: vec![], file_path: String::new(), total_points: 0 }
-        })
-    });
+    let cache_result = SRS_CACHE.get_or_init(|| init_srs_cache().map_err(|e| format!("{}", e)));
+
+    let cache = cache_result
+        .as_ref()
+        .map_err(|e| phase_err(format!("PhaseBarrier: SRS initialization failed: {}", e)))?;
 
     if num_points > cache.total_points {
         return Err(phase_err(format!(
@@ -189,6 +188,9 @@ fn load_srs_cached(num_points: usize) -> Result<Vec<G1Affine>, BlackBoxResolutio
 ///
 /// Points are stored as 64-byte uncompressed affine coordinates (x, y),
 /// each coordinate a 32-byte big-endian field element.
+///
+/// Validates that coordinates are in range (< Fq modulus) and that the
+/// resulting point is on the BN254 curve. Returns an error for corrupt data.
 fn parse_srs_points(
     data: &[u8],
     num_points: usize,
@@ -205,11 +207,38 @@ fn parse_srs_points(
             continue;
         }
 
-        let x = Fq::from_be_bytes_mod_order(x_bytes);
-        let y = Fq::from_be_bytes_mod_order(y_bytes);
+        // Parse coordinates with range validation: Fq::from_be_bytes_mod_order silently
+        // reduces values >= Fq modulus, which would accept corrupt data. Instead, parse
+        // as a BigInteger and check that it's within range before constructing the field element.
+        let x_bigint = BigInteger256::new({
+            let mut limbs = [0u64; 4];
+            for (j, limb) in limbs.iter_mut().enumerate() {
+                let start = 24 - j * 8;
+                *limb = u64::from_be_bytes(x_bytes[start..start + 8].try_into().unwrap());
+            }
+            limbs
+        });
+        let y_bigint = BigInteger256::new({
+            let mut limbs = [0u64; 4];
+            for (j, limb) in limbs.iter_mut().enumerate() {
+                let start = 24 - j * 8;
+                *limb = u64::from_be_bytes(y_bytes[start..start + 8].try_into().unwrap());
+            }
+            limbs
+        });
 
-        let point = G1Affine::new_unchecked(x, y);
-        debug_assert!(point.is_on_curve(), "SRS point {} is not on the BN254 curve", i);
+        let x = Fq::from_bigint(x_bigint).ok_or_else(|| {
+            phase_err(format!("SRS point {}: x coordinate out of range (>= Fq modulus)", i))
+        })?;
+        let y = Fq::from_bigint(y_bigint).ok_or_else(|| {
+            phase_err(format!("SRS point {}: y coordinate out of range (>= Fq modulus)", i))
+        })?;
+
+        // Use new() which validates the point is on the curve (not new_unchecked)
+        let point = G1Affine::new(x, y);
+        if !point.is_on_curve() {
+            return Err(phase_err(format!("SRS point {} is not on the BN254 curve", i)));
+        }
         points.push(point);
     }
     Ok(points)
