@@ -756,3 +756,39 @@ The `derive_phase_challenge` function constructs a KZG commitment from the commi
 ### 7.9 Phase Barrier Interaction with Circuit Optimization Passes
 
 The `PhaseBarrier` opcode must survive all ACIR-level optimization passes (common subexpression elimination, dead code elimination, etc.) without being reordered or removed. The current implementation marks `PhaseChallenge` / `PhaseChallengeMulti` intrinsics as having side effects (`has_side_effects: true`) and being impure, which prevents SSA-level reordering. At the ACIR level, the existing optimization passes already skip unknown opcodes, so `PhaseBarrier` passes through unchanged. This should be verified if new optimization passes are added.
+
+## 8. Code Review Results
+
+A comprehensive code review was performed after Phases A–D were implemented. 10 issues were identified (3 critical, 7 high, 1 medium). All have been resolved.
+
+### Issue Summary
+
+| ID | Severity | Issue | Resolution |
+|----|----------|-------|------------|
+| C1 | Critical | VK computation crash — `_compute_prover_instance` accessed witness data for VK-only path | Rewrote to guard witness resolution on non-empty witness; VK path sets metadata from AcirFormat |
+| C2 | Critical | Wrong VK metadata — num_phases/phase_challenge_counts not set for VK path | Fixed as part of C1 rewrite |
+| C3 | Critical | SRS init failure permanently cached with no retry | Replaced `OnceLock<SrsCache>` with `OnceLock<Result<SrsCache, String>>` so errors propagate |
+| H1 | High | Witness values read from raw vector without bounds checking | Fixed as part of C1 — witness copied by value before `create_circuit` |
+| H2 | High | No validation that num_phases matches phase barrier constraint count | Added `BB_ASSERT` checking consistency |
+| H3 | High | SRS parsing uses `from_be_bytes_mod_order` + `new_unchecked` (no validation) | Replaced with `BigInteger256` parsing + `Fq::from_bigint()` range check + `is_on_curve()` check |
+| H4 | High | Point-at-infinity encoding mismatch between Rust and C++ | **Confirmed already correct** — both encode as `[0,0,0,0]` |
+| H5 | High | Polynomial size unchecked vs commitment key SRS | **Already handled** — `CommitmentKey::commit()` validates polynomial size vs SRS and throws on overflow |
+| H6 | High | Recursive verifier uses unconstrained num_phases for loop count | Added `assert_equal` constraint for recursive flavors, mirroring `num_public_inputs` pattern |
+| H7 | High | Fragile witness reference — witness vector could be invalidated | Fixed as part of C1 — witness copied by value |
+| M5 | Medium | `resolve_pending_phase_challenge` panics via `assert_eq!` on mismatch | Replaced with proper `Err` return using `PhaseChallengeDerivationFailed` |
+
+### Files Modified
+
+**Noir repo** (`/home/dev/repo`):
+- `acvm-repo/acvm/src/pwg/mod.rs` — M5 fix + updated test
+- `acvm-repo/bn254_blackbox_solver/src/phase_challenge.rs` — C3, H3 fixes
+
+**aztec-packages** (`/home/dev/aztec-packages`):
+- `barretenberg/cpp/src/barretenberg/bbapi/bbapi_ultra_honk.cpp` — C1, C2, H1, H2, H7 fixes
+- `barretenberg/cpp/src/barretenberg/ultra_honk/oink_verifier.cpp` — H6 fix
+
+### Test Results (post-fixes)
+- Rust: All tests pass across acir, acvm, acvm_blackbox_solver, bn254_blackbox_solver, noirc_evaluator, noirc_frontend
+- C++ ultra_honk_tests: 260 passed, 5 skipped, 0 failed
+- C++ dsl_tests (non-recursive): 467 passed, 2 skipped, 0 failed
+- C++ dsl_tests (recursive spot-check): HypernovaRecursionConstraintTest.RecursiveVerifierAppCircuit passed
