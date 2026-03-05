@@ -549,27 +549,153 @@ Both approaches are available to developers. The choice depends on whether the c
 
 **Verification**: `cargo nextest run -p nargo`
 
-### Phase D: Barretenberg Backend
+### Phase D: Barretenberg Backend (fork required)
 
 **Scope**: BN254 blackbox solver + barretenberg prover/verifier.
+**Repository**: Requires a fork of [AztecProtocol/barretenberg](https://github.com/AztecProtocol/aztec-packages/tree/master/barretenberg).
 
-1. Implement `derive_phase_challenge` in the BN254 blackbox solver using Poseidon2 transcript + KZG commitment
-2. Ensure deterministic challenge derivation (same inputs → same challenge, always)
-3. Modify barretenberg's `acir_format` translator to recognize `PhaseBarrier` opcodes and insert corresponding commitment rounds into the Oink prover
-4. Modify barretenberg's verifier to reconstruct the multi-round transcript including phase barrier rounds
-5. End-to-end test: prove and verify a multi-phase Noir program against barretenberg
+#### Why bb changes are necessary
 
-**Verification**: Full prove/verify cycle with barretenberg backend.
+Alternative approaches were considered and rejected:
 
-### Phase E: Enclave Circuit Migration
+- **Option B (multi-phase witness gen + in-circuit Poseidon2 check)**: The `PhaseBarrier` would derive a challenge during witness generation, but the circuit would also contain in-circuit Poseidon2 constraints to verify `challenge == Hash(witnesses)`. This was rejected because **the volume of data being hashed is the bottleneck, not the hash function**. The Enclave circuits absorb thousands of field elements (polynomial coefficients, ciphertexts, public keys) into their Fiat-Shamir transcripts. Even with raw Poseidon2 (~100 constraints per field element at rate-3), hashing 2000-3000 field elements would still cost ~200K-300K constraints. The SAFE sponge's Keccak tags add ~150K/instance on top, but eliminating only the tags still leaves most of the cost.
+
+- **Option C (replace SAFE sponge with raw Poseidon2 in Enclave circuits)**: Pure Noir-side refactoring with no infrastructure changes. Saves the Keccak tag overhead (~450K across 3 instances) but keeps all Poseidon2 absorption costs. Achieves maybe 40-60% of the possible savings.
+
+- **Option A (full multi-phase — chosen approach)**: The backend commits to witness polynomials via KZG *outside the circuit* as part of its normal proving flow, then derives challenges from those commitments via its Poseidon2 transcript. Zero in-circuit hashing is needed for challenge derivation. This is the only approach that eliminates the volume problem entirely, achieving the ~92% reduction in Fiat-Shamir constraint cost.
+
+The key insight: barretenberg already commits to all wire polynomials and derives Fiat-Shamir challenges during its Oink rounds. The `PhaseBarrier` exposes this existing capability to circuit authors. The bb changes are about *plumbing*, not new cryptography.
+
+#### Implementation Steps
+
+##### D.1: `derive_phase_challenge` on `Bn254BlackBoxSolver`
+
+The `Bn254BlackBoxSolver` (used during `nargo execute` / `nargo prove` for witness generation) must implement the `derive_phase_challenge` method. This is the function called when the ACVM pauses at a `PhaseBarrier`.
+
+**Requirements**:
+- Pure function: `(phase_id, witness_values[]) -> challenge_values[]`
+- Deterministic: same inputs always produce same outputs
+- Must match what the prover/verifier will compute from the proof's commitments
+
+**Implementation**: Construct a KZG commitment to the witness values (treating them as evaluations of a polynomial over a domain), absorb the commitment into a Poseidon2 transcript, and squeeze challenge values. This mirrors what the Oink prover does internally.
+
+**Location in bb**: The `Bn254BlackBoxSolver` lives in the Noir monorepo at `acvm-repo/bn254_blackbox_solver/` but wraps barretenberg's C++ via FFI. The `derive_phase_challenge` implementation will need a new FFI binding to a C++ function that performs the KZG commit + transcript squeeze.
+
+##### D.2: `acir_format` translator
+
+The `acir_format` module in barretenberg translates ACIR opcodes into bb's internal constraint system representation. It must recognize `PhaseBarrier` opcodes and:
+- Record which witness indices are committed at each phase boundary
+- Record which witness indices receive challenge values
+- Pass this metadata to the proving key builder so the Oink prover knows about the extra commitment rounds
+
+**Key files** (in bb repo):
+- `barretenberg/cpp/src/barretenberg/dsl/acir_format/acir_format.hpp` — ACIR constraint structures
+- `barretenberg/cpp/src/barretenberg/dsl/acir_format/acir_to_constraint_buf.cpp` — ACIR opcode translation
+
+##### D.3: Oink prover modification
+
+The Oink prover performs commitment rounds in a fixed sequence (Round 0: wires, Round 1: logUp, Round 2: grand product). Phase barrier rounds should be inserted **before** the standard Oink rounds so they don't interfere with the existing structure.
+
+For each `PhaseBarrier` (ordered by `phase_id`):
+1. Construct a polynomial from the committed witness values
+2. Commit to it using the circuit's KZG commitment key
+3. Absorb the commitment into the Fiat-Shamir transcript
+4. Squeeze `num_challenges` challenge values
+5. These challenges must equal the values already in the witness (injected during ACVM execution via `derive_phase_challenge`)
+
+The prover does not need to *inject* values — they're already in the witness from ACVM execution. It just needs to include the extra commitments in the proof and ensure the transcript is consistent.
+
+**Key files**:
+- `barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.hpp`
+- `barretenberg/cpp/src/barretenberg/ultra_honk/oink_prover.cpp`
+
+##### D.4: Verifier modification
+
+The verifier must reconstruct the same multi-round transcript:
+1. Read the phase barrier commitment(s) from the proof
+2. Absorb them into the transcript
+3. Squeeze the same challenge values
+4. Use those challenges when checking Phase 2 constraints
+
+**Key files**:
+- `barretenberg/cpp/src/barretenberg/ultra_honk/oink_verifier.hpp`
+- `barretenberg/cpp/src/barretenberg/ultra_honk/oink_verifier.cpp`
+
+##### D.5: Proof format
+
+The proof must include the phase barrier commitments (group elements) in addition to the standard wire commitments. These appear at the beginning of the proof, before the standard Oink commitments. The proof size increases by one group element per phase barrier.
+
+##### D.6: Recursive verifier
+
+For Enclave's proof aggregation pipeline, the recursive verifier circuit (used via `RecursiveAggregation` black box) must also handle the extra transcript rounds. This is the same change as D.4 but in the recursive verifier circuit builder.
+
+**Key files**:
+- `barretenberg/cpp/src/barretenberg/stdlib/honk_verifier/`
+
+##### D.7: End-to-end test
+
+Prove and verify a multi-phase Noir program against the modified barretenberg:
+- Compile a Noir program that uses `std::phase::challenge()`
+- Generate witness via `nargo execute` (exercises `derive_phase_challenge`)
+- Prove via the modified bb prover (exercises Oink round insertion)
+- Verify via the modified bb verifier (exercises transcript reconstruction)
+- Recursively verify the proof in another circuit (exercises recursive verifier)
+
+**Verification**: Full prove/verify cycle including recursive verification.
+
+### Phase E: Enclave Circuit Migration (fork required)
 
 **Scope**: Enclave repository.
+**Repository**: Requires a fork of [gnosisguild/enclave](https://github.com/gnosisguild/enclave).
 
-1. Replace `compute_challenge()` calls (Fiat-Shamir) with `std::phase::challenge()` in all PVSS circuits
-2. Optionally replace `compute_commitment()` calls with backend commitment approach or keep lightweight Poseidon2 hashing for cross-circuit linking
-3. Benchmark constraint counts and proving times against the current implementation
-4. Update the commitment DAG documentation
-5. Validate recursive proof aggregation still works with multi-phase inner proofs
+#### Migration Strategy
+
+The migration has two independent parts with different risk profiles:
+
+##### E.1: Replace Fiat-Shamir challenge derivation (high impact, core change)
+
+Replace `compute_challenge()` calls (the SAFE sponge Fiat-Shamir instances) with `std::phase::challenge()` in all PVSS circuits. This is where the bulk of the constraint savings come from.
+
+**For each circuit**:
+1. Identify all SAFE sponge calls used for Fiat-Shamir challenge derivation
+2. Collect the witness data that was being absorbed (polynomial coefficients, ciphertexts, public keys)
+3. Replace with `let gamma = std::phase::challenge(flatten([data...]))`
+4. The polynomial evaluation and Schwartz-Zippel checks remain unchanged
+
+The SAFE sponge calls used for **commitments** (as opposed to challenge derivation) are handled separately in E.2.
+
+##### E.2: Decide commitment strategy (lower impact, design choice)
+
+The current circuits compute in-circuit commitments (hashes of polynomial coefficients) that serve two purposes:
+1. **Input to Fiat-Shamir** — eliminated by E.1
+2. **Cross-circuit linking** — commitment values are exposed as public outputs and consumed as public inputs by downstream circuits
+
+For purpose (2), there are two options:
+
+**Option 1: Keep lightweight in-circuit commitments.** Replace the SAFE sponge commitments with raw Poseidon2 hashing (no Keccak tags, no domain separation overhead). This costs ~100 constraints per field element absorbed. For the commitment DAG, this may be acceptable if the number of field elements being committed is small (e.g., just the final evaluation results, not the full polynomial coefficients).
+
+**Option 2: Use backend commitments via recursive verification.** The KZG commitments from Phase 1 are implicitly verified when a downstream circuit recursively verifies the upstream proof. No separate in-circuit commitment is needed. This is the cleanest approach if Enclave already uses recursive aggregation (which it does).
+
+Recommendation: Start with Option 2 (no in-circuit commitments for linking) since Enclave's architecture already relies on recursive proof aggregation. Fall back to Option 1 only for cases where a commitment value must be visible outside the proving system (e.g., posted on-chain independently of the proof).
+
+##### E.3: Benchmarking
+
+For each of the 10+ circuits:
+1. Measure current gate count (baseline)
+2. Migrate to `std::phase::challenge()`
+3. Measure new gate count
+4. Compare against the estimates in Section 5
+5. Measure proving time reduction (gate count is a proxy but proving time depends on other factors like FFT sizes and MSM batch sizes)
+
+##### E.4: Recursive aggregation validation
+
+The Enclave pipeline aggregates proofs recursively. After migration:
+1. Generate a multi-phase proof for each circuit
+2. Recursively verify it in the aggregation circuit
+3. Verify the aggregated proof
+4. Confirm the full pipeline works end-to-end
+
+This is the highest-risk validation step. If the recursive verifier doesn't correctly handle the extra transcript rounds (Phase D.6), the aggregation will fail.
 
 ## 7. Open Questions
 
@@ -581,7 +707,7 @@ This is naturally handled if `PhaseBarrier` maps to a barretenberg Oink commitme
 
 ### 7.2 Multiple Barriers Per Circuit
 
-The design supports multiple `PhaseBarrier` opcodes for multi-round protocols (e.g., commit → challenge₁ → compute → commit → challenge₂). The `phase_id` establishes ordering. **Question for Enclave**: Do any of the 12 PVSS circuits need more than one phase barrier (i.e., more than 2 phases)?
+The design supports multiple `PhaseBarrier` opcodes for multi-round protocols (e.g., commit → challenge₁ → compute → commit → challenge₂). The `phase_id` establishes ordering. The ACVM enforces sequential phase_id ordering (0, 1, 2, ...) at runtime. **Question for Enclave**: Do any of the 12 PVSS circuits need more than one phase barrier (i.e., more than 2 phases)?
 
 ### 7.3 Opcode Ordering Guarantees
 
@@ -596,6 +722,8 @@ The compiler should emit a compile-time error if a `std::phase::challenge()` cal
 ### 7.5 Recursive Verification Compatibility
 
 When a multi-phase proof is verified recursively via `RecursiveAggregation`, the inner verifier must reconstruct the multi-round transcript including phase barrier commitment rounds. This should work if the proof format encodes the phase structure (number of extra commitment rounds and their positions in the transcript). Needs validation against barretenberg's recursive verifier circuit.
+
+This is the highest-risk item for the Enclave integration (Phase E.4). If the recursive verifier doesn't handle the extra transcript rounds correctly, the entire proof aggregation pipeline breaks. Recommend testing this early in Phase D (before migrating Enclave circuits).
 
 ### 7.6 Security Model Differences
 
@@ -616,3 +744,11 @@ However, for use cases requiring application-level domain separation or commitme
 The current design commits to an explicit list of witnesses (`commit_witnesses`). An alternative is to commit to *all* witnesses assigned so far (matching how barretenberg commits to entire wire polynomials). The explicit list is more flexible (allows committing to subsets) but requires the circuit author to specify which witnesses to include. The "commit all" approach is simpler but may include witnesses that shouldn't influence the challenge (e.g., intermediate computation values that are not part of the protocol transcript).
 
 Recommendation: Start with explicit witness lists. If ergonomics are poor, add a `challenge_all()` variant that commits to the full witness state.
+
+### 7.8 KZG Commitment Key Sizing
+
+The `derive_phase_challenge` function constructs a KZG commitment from the committed witness values. The commitment key (SRS) must be large enough to commit to a polynomial of degree equal to the number of committed witnesses. For Enclave circuits committing thousands of field elements, this should be well within the standard SRS sizes used by barretenberg (which supports circuits with millions of gates). However, the Phase D implementation should verify that the SRS available to `Bn254BlackBoxSolver` during witness generation is the same SRS that the prover will use, to ensure deterministic challenge agreement.
+
+### 7.9 Phase Barrier Interaction with Circuit Optimization Passes
+
+The `PhaseBarrier` opcode must survive all ACIR-level optimization passes (common subexpression elimination, dead code elimination, etc.) without being reordered or removed. The current implementation marks `PhaseChallenge` / `PhaseChallengeMulti` intrinsics as having side effects (`has_side_effects: true`) and being impure, which prevents SSA-level reordering. At the ACIR level, the existing optimization passes already skip unknown opcodes, so `PhaseBarrier` passes through unchanged. This should be verified if new optimization passes are added.
