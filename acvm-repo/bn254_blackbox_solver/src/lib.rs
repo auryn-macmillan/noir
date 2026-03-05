@@ -5,6 +5,7 @@ use acvm_blackbox_solver::{BlackBoxFunctionSolver, BlackBoxResolutionError};
 
 mod embedded_curve_ops;
 mod generator;
+mod phase_challenge;
 mod poseidon2;
 mod poseidon2_constants;
 
@@ -59,5 +60,14 @@ impl BlackBoxFunctionSolver<FieldElement> for Bn254BlackBoxSolver {
         inputs: &[FieldElement],
     ) -> Result<Vec<FieldElement>, BlackBoxResolutionError> {
         poseidon2_permutation(inputs)
+    }
+
+    fn derive_phase_challenge(
+        &self,
+        phase_id: u32,
+        witness_values: &[FieldElement],
+        num_challenges: usize,
+    ) -> Result<Vec<FieldElement>, BlackBoxResolutionError> {
+        phase_challenge::derive_phase_challenge(phase_id, witness_values, num_challenges)
     }
 }
