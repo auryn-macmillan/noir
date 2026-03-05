@@ -409,15 +409,24 @@ The `PhaseBarrier` variant needs `Serialize`/`Deserialize` support. Since `Opcod
 
 ## 4. Barretenberg Integration Details
 
-### Challenge Derivation Strategy
+### Challenge Derivation Strategy — Standalone Sponge Protocol
 
-We recommend **deterministic re-derivation** for the initial implementation:
+**Implemented design** (refined from original "deterministic re-derivation" plan):
 
-1. `derive_phase_challenge` is a **pure function**: it takes witness values, commits to them (KZG), hashes the commitment (Poseidon2), and squeezes challenge values. No shared state with the prover.
-2. During actual proving, the barretenberg prover independently reconstructs the same transcript. The commitments to Phase 1 witnesses are part of the proof; the verifier recomputes the same challenge from them.
-3. This cleanly separates ACVM execution (witness generation) from proving. The `BlackBoxFunctionSolver` instance does not need to outlive the ACVM execution or be passed to the prover.
+Phase barrier challenges are derived via a **standalone Poseidon2 sponge hash** that is completely independent of barretenberg's main Fiat-Shamir transcript. This avoids a fundamental impedance mismatch: the Rust-side `derive_phase_challenge` (called during `nargo execute`) does not have access to the VK hash or public inputs that barretenberg's transcript has already absorbed.
 
-An alternative (**shared transcript state**) avoids redundant commitment computation but couples the ACVM execution to a specific prover instance. This optimization can be layered on later without changing the ACIR or ACVM interfaces.
+The protocol:
+
+1. `derive_phase_challenge` is a **pure function** in the Rust `Bn254BlackBoxSolver`:
+   - Commits to `witness_values` via KZG (using the BN254 SRS loaded from `~/.bb-crs/bn254_g1.dat`)
+   - Encodes the KZG commitment point (x, y) as 4 Fr limbs (lo/hi split at 2^136)
+   - Feeds `[phase_id_as_fr, x_lo, x_hi, y_lo, y_hi]` into a Poseidon2 sponge hash
+   - The hash output is the challenge; for multiple challenges, the 254-bit hash is split into 127-bit halves
+2. The bb **OinkProver** commits to the phase barrier witness polynomial and sends the commitment to the transcript via `send_to_verifier()`, but does **NOT** squeeze a challenge from the transcript.
+3. The bb **OinkVerifier** receives the commitment from the transcript via `receive_from_prover()`, but does **NOT** squeeze a challenge.
+4. **Soundness argument**: The commitment is binding (KZG) and becomes part of the proof. The challenge was deterministically derived from the commitment during ACVM execution. Phase 2 circuit constraints check polynomial identities using the challenge. Sumcheck + PCS verify all constraints and wire polynomial commitments. If the prover used a wrong challenge, circuit constraints would fail Sumcheck.
+
+This cleanly separates ACVM execution (witness generation + challenge derivation) from proving (commitment + transcript binding).
 
 ### Mapping to Oink Rounds
 
@@ -429,18 +438,13 @@ Barretenberg's Oink prover already performs this exact pattern:
 | Round 1 | w_4, lookup_read_counts, lookup_read_tags | β, γ | Permutation argument, logUp lookup batching |
 | Round 2 | lookup_inverses, z_perm | α | Subrelation batching in Sumcheck |
 
-A `PhaseBarrier` maps to a **custom commitment round** inserted into (or before) the Oink sequence. The `phase_id` determines where in the transcript this round falls. The simplest approach: Phase barriers are processed *before* the standard Oink rounds begin, so they don't interfere with barretenberg's existing round structure.
+Phase barriers are processed *before* the standard Oink rounds begin (`commit_to_phase_barriers()` is called before Round 0). Each barrier commits to its witness polynomial and sends the commitment to the transcript. The commitments are included in the proof before the standard wire commitments.
 
 ### Verifier Behavior
 
-The verifier performs the same multi-round protocol:
-1. Read Phase 1 wire commitments from the proof
-2. Derive the same challenges using the same transcript
-3. Verify Phase 2 constraints using those challenges
+The verifier receives phase barrier commitments from the proof and absorbs them into the transcript (for ordering/binding), but does not derive challenges from the transcript. The challenge values are verified implicitly: they are part of the witness, used in Phase 2 constraints, and Sumcheck verifies all constraint satisfaction.
 
-This is structurally identical to how barretenberg's verifier already processes Oink rounds. The `PhaseBarrier` simply adds one or more custom commitment rounds to the beginning of the transcript.
-
-For **recursive verification** (used in Enclave's proof aggregation), the `RecursiveAggregation` black box function already handles multi-round transcript verification internally. A multi-phase inner proof is verified the same way as a single-phase proof — the recursive verifier reconstructs the full transcript including any phase barrier rounds.
+For **recursive verification** (used in Enclave's proof aggregation), the `RecursiveAggregation` black box function handles the extra transcript data. The recursive verifier receives the phase barrier commitments as part of the inner proof and processes them the same way — absorb into transcript, no challenge squeeze.
 
 ## 5. Impact on Enclave PVSS Circuits
 
