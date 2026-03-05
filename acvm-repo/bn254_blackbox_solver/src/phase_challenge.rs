@@ -1,18 +1,36 @@
 //! Multi-phase circuit challenge derivation for BN254.
 //!
-//! Implements the `derive_phase_challenge` method by replicating barretenberg's
-//! transcript protocol:
+//! Implements the `derive_phase_challenge` method using a **standalone sponge**
+//! protocol that both the Rust ACVM executor and barretenberg's C++ prover/verifier
+//! can compute identically:
 //!
 //! 1. KZG commitment: MSM of witness values against BN254 SRS monomial points
-//! 2. Commitment encoding: G1 affine → 4 Fr elements (bb's limb encoding)
-//! 3. Poseidon2 sponge hash of the encoded commitment
-//! 4. Challenge splitting: 254-bit hash → pairs of 127-bit challenges
+//! 2. Commitment encoding: G1 affine -> 4 Fr elements (bb's limb encoding)
+//! 3. Standalone Poseidon2 sponge hash of `[phase_id, x_lo, x_hi, y_lo, y_hi]`
+//! 4. Challenge splitting: 254-bit hash -> pairs of 127-bit challenges
+//!
+//! ## Why a standalone sponge (not the transcript)?
+//!
+//! Barretenberg's Oink transcript accumulates VK hash + public inputs before
+//! phase barriers. The Rust side (nargo execute) doesn't have the VK hash at
+//! execution time (it's only computed by bb after proving key generation).
+//!
+//! To ensure both sides derive identical challenges, phase barrier challenges
+//! are derived via a standalone Poseidon2 sponge hash that depends only on:
+//! - The `phase_id` (domain separation for multiple barriers)
+//! - The KZG commitment to the witness values
+//!
+//! The bb prover/verifier still absorb the commitment into the main transcript
+//! (for binding/ordering), but derive the challenge via this same standalone hash.
 
 use acir::AcirField;
 use acvm_blackbox_solver::BlackBoxResolutionError;
 use ark_bn254::{Fq, Fr, G1Affine};
 use ark_ec::{AffineRepr, VariableBaseMSM};
 use ark_ff::{BigInteger, BigInteger256, PrimeField};
+
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::OnceLock;
 
 use crate::FieldElement;
 use crate::poseidon2::poseidon2_permutation;
@@ -21,77 +39,165 @@ use crate::poseidon2::poseidon2_permutation;
 /// base field (Fq) elements as pairs of scalar field (Fr) elements.
 const NUM_LIMB_BITS: u32 = 136;
 
+/// Maximum number of SRS points to cache. Points beyond this are loaded on demand.
+/// 2^16 = 65536 points * 64 bytes = 4MB — reasonable for most circuits.
+const SRS_CACHE_MAX_POINTS: usize = 1 << 16;
+
+/// Global SRS cache. Loaded once on first use and reused across all calls.
+static SRS_CACHE: OnceLock<SrsCache> = OnceLock::new();
+
+/// Cached SRS data: pre-parsed G1 affine points and the file path for overflow.
+struct SrsCache {
+    /// Pre-parsed points (up to SRS_CACHE_MAX_POINTS).
+    points: Vec<G1Affine>,
+    /// Path to the SRS file, for loading additional points beyond the cache.
+    file_path: String,
+    /// Total number of points available in the SRS file.
+    total_points: usize,
+}
+
+/// Error helper that uses a descriptive string (no misleading BlackBoxFunc variant).
+fn phase_err(msg: String) -> BlackBoxResolutionError {
+    // We reuse Poseidon2Permutation as the closest existing discriminant.
+    // The error message itself clearly identifies this as a PhaseBarrier error.
+    BlackBoxResolutionError::Failed(acir::BlackBoxFunc::Poseidon2Permutation, msg)
+}
+
 /// Derive Fiat-Shamir challenge(s) by committing to witness values using KZG
-/// and hashing the commitment via barretenberg's Poseidon2 transcript protocol.
+/// and hashing the commitment via a standalone Poseidon2 sponge.
 ///
-/// This replicates the exact challenge derivation that the barretenberg
-/// prover/verifier will perform, ensuring deterministic agreement between
-/// witness generation (Rust) and proving (C++).
+/// Protocol:
+/// 1. `C = KZG_commit(witness_values)` using the BN254 SRS
+/// 2. Encode `C` as `[x_lo, x_hi, y_lo, y_hi]` (bb's limb encoding)
+/// 3. `hash = Poseidon2_sponge_hash([phase_id, x_lo, x_hi, y_lo, y_hi])`
+/// 4. Split hash into 127-bit challenge pair `(lo, hi)`
+/// 5. For >2 challenges, chain: `hash_n = Poseidon2_sponge_hash([hash_{n-1}])`
+///
+/// Both the Rust ACVM executor and bb's C++ prover/verifier compute this
+/// identical standalone hash, ensuring challenge agreement without requiring
+/// VK hash or public input context.
 pub(crate) fn derive_phase_challenge(
-    _phase_id: u32,
+    phase_id: u32,
     witness_values: &[FieldElement],
     num_challenges: usize,
 ) -> Result<Vec<FieldElement>, BlackBoxResolutionError> {
     if witness_values.is_empty() {
-        return Err(BlackBoxResolutionError::Failed(
-            acir::BlackBoxFunc::Poseidon2Permutation,
+        return Err(phase_err(
             "PhaseBarrier: cannot derive challenge from empty witness list".into(),
         ));
     }
     if num_challenges == 0 {
-        return Err(BlackBoxResolutionError::Failed(
-            acir::BlackBoxFunc::Poseidon2Permutation,
-            "PhaseBarrier: must request at least one challenge".into(),
-        ));
+        return Err(phase_err("PhaseBarrier: must request at least one challenge".into()));
     }
 
-    // Step 1: Load SRS and compute KZG commitment
-    let srs_points = load_srs(witness_values.len())?;
+    // Step 1: Load SRS points and compute KZG commitment
+    let srs_points = load_srs_cached(witness_values.len())?;
     let commitment = kzg_commit(witness_values, &srs_points)?;
 
     // Step 2: Encode the commitment as field elements (bb's limb encoding)
     let commitment_frs = encode_g1_as_fr_elements(&commitment);
 
-    // Step 3-4: Hash via Poseidon2 sponge and extract challenges
-    let challenges = poseidon2_transcript_squeeze(&commitment_frs, num_challenges)?;
+    // Step 3: Build standalone sponge input: [phase_id, x_lo, x_hi, y_lo, y_hi]
+    let phase_id_fr = FieldElement::from(phase_id as u128);
+    let sponge_input =
+        [phase_id_fr, commitment_frs[0], commitment_frs[1], commitment_frs[2], commitment_frs[3]];
+
+    // Step 4-5: Hash via Poseidon2 sponge and extract challenges
+    let challenges = poseidon2_squeeze_challenges(&sponge_input, num_challenges)?;
 
     Ok(challenges)
 }
 
 // ---------------------------------------------------------------------------
-// SRS Loading
+// SRS Loading (with caching and partial reads)
 // ---------------------------------------------------------------------------
 
-/// Load BN254 G1 SRS points from the standard barretenberg cache location.
-///
-/// Points are stored as 64-byte uncompressed affine coordinates (x, y),
-/// each coordinate a 32-byte big-endian field element in standard form.
-fn load_srs(num_points: usize) -> Result<Vec<G1Affine>, BlackBoxResolutionError> {
-    let srs_path = srs_file_path()?;
+/// Initialize the global SRS cache from disk. Called once via OnceLock.
+fn init_srs_cache() -> Result<SrsCache, BlackBoxResolutionError> {
+    let file_path = srs_file_path()?;
 
-    let data = std::fs::read(&srs_path).map_err(|e| {
-        BlackBoxResolutionError::Failed(
-            acir::BlackBoxFunc::Poseidon2Permutation,
-            format!("PhaseBarrier: failed to read BN254 SRS file at '{}': {}", srs_path, e),
-        )
+    let file = std::fs::File::open(&file_path).map_err(|e| {
+        phase_err(format!("PhaseBarrier: failed to open BN254 SRS file at '{}': {}", file_path, e))
     })?;
 
-    let available_points = data.len() / 64;
-    if available_points < num_points {
-        return Err(BlackBoxResolutionError::Failed(
-            acir::BlackBoxFunc::Poseidon2Permutation,
-            format!(
-                "PhaseBarrier: SRS file has {} points but {} are needed",
-                available_points, num_points
-            ),
-        ));
+    let file_len = file
+        .metadata()
+        .map_err(|e| phase_err(format!("PhaseBarrier: failed to read SRS file metadata: {}", e)))?
+        .len() as usize;
+
+    let total_points = file_len / 64;
+    let cache_count = total_points.min(SRS_CACHE_MAX_POINTS);
+
+    // Read only the bytes we need for the cache
+    let bytes_needed = cache_count * 64;
+    let mut buf = vec![0u8; bytes_needed];
+    let mut reader = std::io::BufReader::new(file);
+    reader.read_exact(&mut buf).map_err(|e| {
+        phase_err(format!("PhaseBarrier: failed to read {} bytes from SRS: {}", bytes_needed, e))
+    })?;
+
+    let points = parse_srs_points(&buf, cache_count)?;
+
+    Ok(SrsCache { points, file_path, total_points })
+}
+
+/// Load SRS points, using the global cache for the first SRS_CACHE_MAX_POINTS
+/// and reading additional points from disk on demand.
+fn load_srs_cached(num_points: usize) -> Result<Vec<G1Affine>, BlackBoxResolutionError> {
+    let cache = SRS_CACHE.get_or_init(|| {
+        init_srs_cache().unwrap_or_else(|e| {
+            // OnceLock requires a value, not a Result. Store an empty cache
+            // and let the caller detect the insufficient points.
+            eprintln!("Warning: SRS cache initialization failed: {}", e);
+            SrsCache { points: vec![], file_path: String::new(), total_points: 0 }
+        })
+    });
+
+    if num_points > cache.total_points {
+        return Err(phase_err(format!(
+            "PhaseBarrier: SRS has {} points but {} are needed",
+            cache.total_points, num_points
+        )));
     }
 
+    if num_points <= cache.points.len() {
+        // Fast path: all points are in cache
+        Ok(cache.points[..num_points].to_vec())
+    } else {
+        // Slow path: need more points than the cache holds
+        let mut points = cache.points.clone();
+        let additional = num_points - points.len();
+        let offset = points.len() * 64;
+        let bytes_needed = additional * 64;
+
+        let mut file = std::fs::File::open(&cache.file_path)
+            .map_err(|e| phase_err(format!("PhaseBarrier: failed to reopen SRS file: {}", e)))?;
+        file.seek(SeekFrom::Start(offset as u64))
+            .map_err(|e| phase_err(format!("PhaseBarrier: failed to seek in SRS file: {}", e)))?;
+        let mut buf = vec![0u8; bytes_needed];
+        file.read_exact(&mut buf).map_err(|e| {
+            phase_err(format!("PhaseBarrier: failed to read additional SRS points: {}", e))
+        })?;
+
+        let extra_points = parse_srs_points(&buf, additional)?;
+        points.extend(extra_points);
+        Ok(points)
+    }
+}
+
+/// Parse raw SRS bytes into G1Affine points.
+///
+/// Points are stored as 64-byte uncompressed affine coordinates (x, y),
+/// each coordinate a 32-byte big-endian field element.
+fn parse_srs_points(
+    data: &[u8],
+    num_points: usize,
+) -> Result<Vec<G1Affine>, BlackBoxResolutionError> {
     let mut points = Vec::with_capacity(num_points);
     for i in 0..num_points {
         let offset = i * 64;
-        let x_bytes: &[u8] = &data[offset..offset + 32];
-        let y_bytes: &[u8] = &data[offset + 32..offset + 64];
+        let x_bytes = &data[offset..offset + 32];
+        let y_bytes = &data[offset + 32..offset + 64];
 
         // Check for point at infinity (all 0xFF)
         if x_bytes.iter().all(|&b| b == 0xFF) && y_bytes.iter().all(|&b| b == 0xFF) {
@@ -99,16 +205,13 @@ fn load_srs(num_points: usize) -> Result<Vec<G1Affine>, BlackBoxResolutionError>
             continue;
         }
 
-        // Parse big-endian 256-bit integers as Fq field elements
         let x = Fq::from_be_bytes_mod_order(x_bytes);
         let y = Fq::from_be_bytes_mod_order(y_bytes);
 
         let point = G1Affine::new_unchecked(x, y);
-        // In release builds we trust the SRS; in debug builds verify on-curve
         debug_assert!(point.is_on_curve(), "SRS point {} is not on the BN254 curve", i);
         points.push(point);
     }
-
     Ok(points)
 }
 
@@ -119,8 +222,7 @@ fn srs_file_path() -> Result<String, BlackBoxResolutionError> {
     } else if let Ok(home) = std::env::var("HOME") {
         format!("{}/.bb-crs", home)
     } else {
-        return Err(BlackBoxResolutionError::Failed(
-            acir::BlackBoxFunc::Poseidon2Permutation,
+        return Err(phase_err(
             "PhaseBarrier: cannot determine SRS path (no HOME or CRS_PATH set)".into(),
         ));
     };
@@ -141,14 +243,8 @@ fn kzg_commit(
 ) -> Result<G1Affine, BlackBoxResolutionError> {
     let scalars: Vec<Fr> = witness_values.iter().map(|v| v.into_repr()).collect();
 
-    // ark's VariableBaseMSM computes sum_i scalar_i * base_i
-    let result =
-        <ark_bn254::G1Projective as VariableBaseMSM>::msm(srs_points, &scalars).map_err(|e| {
-            BlackBoxResolutionError::Failed(
-                acir::BlackBoxFunc::Poseidon2Permutation,
-                format!("PhaseBarrier: KZG commitment MSM failed: {}", e),
-            )
-        })?;
+    let result = <ark_bn254::G1Projective as VariableBaseMSM>::msm(srs_points, &scalars)
+        .map_err(|e| phase_err(format!("PhaseBarrier: KZG commitment MSM failed: {}", e)))?;
 
     Ok(result.into())
 }
@@ -185,44 +281,34 @@ fn split_fq_to_fr_pair(fq: &Fq) -> (FieldElement, FieldElement) {
     let bigint: BigInteger256 = (*fq).into();
     let bytes_be = bigint.to_bytes_be();
 
-    // Total bits: 256 (BigInteger256), but Fq is ~254 bits
-    // lo = lower NUM_LIMB_BITS (136) bits
-    // hi = upper (256 - 136) = 120 bits, but only ~118 are meaningful for Fq
-
-    // Convert to a big integer for bit manipulation
     let full = num_bigint::BigUint::from_bytes_be(&bytes_be);
     let lo_mask = (num_bigint::BigUint::from(1u64) << NUM_LIMB_BITS) - 1u64;
     let lo = &full & &lo_mask;
     let hi = &full >> NUM_LIMB_BITS;
 
-    let lo_bytes = lo.to_bytes_be();
-    let hi_bytes = hi.to_bytes_be();
-
-    let lo_fr = Fr::from_be_bytes_mod_order(&lo_bytes);
-    let hi_fr = Fr::from_be_bytes_mod_order(&hi_bytes);
+    let lo_fr = Fr::from_be_bytes_mod_order(&lo.to_bytes_be());
+    let hi_fr = Fr::from_be_bytes_mod_order(&hi.to_bytes_be());
 
     (FieldElement::from_repr(lo_fr), FieldElement::from_repr(hi_fr))
 }
 
 // ---------------------------------------------------------------------------
-// Poseidon2 Sponge Transcript (matches bb's BaseTranscript)
+// Poseidon2 Standalone Sponge (NOT the transcript — independent hash)
 // ---------------------------------------------------------------------------
 
-/// Hash field elements using barretenberg's Poseidon2 sponge protocol and
-/// extract challenges.
+/// Derive challenges from a standalone Poseidon2 sponge hash.
 ///
-/// Protocol:
-/// 1. IV = input_length << 64 (placed in capacity slot, state[3])
-/// 2. Absorb input elements additively into rate slots (state[0..3]), rate=3
-/// 3. When rate slots fill, apply Poseidon2 permutation
-/// 4. Final squeeze: apply permutation, output = state[0]
-/// 5. Split 254-bit output into 2 × 127-bit challenges
-/// 6. For additional challenges, hash [previous_output] to get more pairs
-fn poseidon2_transcript_squeeze(
+/// This is NOT the transcript protocol — it's a simple hash-and-split:
+/// 1. `hash_0 = Poseidon2_sponge_hash(data)` -> split into (lo_0, hi_0)
+/// 2. `hash_1 = Poseidon2_sponge_hash([hash_0])` -> split into (lo_1, hi_1)
+/// 3. Continue chaining for additional challenges.
+///
+/// Both the Rust ACVM executor and bb's C++ prover/verifier use this same
+/// standalone hash (not the transcript) for phase barrier challenges.
+fn poseidon2_squeeze_challenges(
     data: &[FieldElement],
     num_challenges: usize,
 ) -> Result<Vec<FieldElement>, BlackBoxResolutionError> {
-    // Compute the sponge hash of the data (this is the first challenge source)
     let hash_output = poseidon2_sponge_hash(data)?;
 
     let mut challenges = Vec::with_capacity(num_challenges);
@@ -232,23 +318,23 @@ fn poseidon2_transcript_squeeze(
         challenges.push(hi);
     }
 
-    // For additional challenges beyond the first pair, hash the previous output
-    let mut prev_challenge = hash_output;
+    // For additional challenges beyond the first pair, chain hash outputs
+    let mut prev_hash = hash_output;
     while challenges.len() < num_challenges {
-        let next_hash = poseidon2_sponge_hash(&[prev_challenge])?;
+        let next_hash = poseidon2_sponge_hash(&[prev_hash])?;
         let (lo, hi) = split_challenge(&next_hash);
         challenges.push(lo);
         if challenges.len() < num_challenges {
             challenges.push(hi);
         }
-        prev_challenge = next_hash;
+        prev_hash = next_hash;
     }
 
     challenges.truncate(num_challenges);
     Ok(challenges)
 }
 
-/// Poseidon2 sponge hash matching barretenberg's `FieldSponge::hash()`.
+/// Poseidon2 sponge hash matching barretenberg's `FieldSponge::hash_internal()`.
 ///
 /// State width t=4, rate=3, capacity=1.
 /// IV = input_length << 64 in state[3] (capacity slot).
@@ -308,6 +394,7 @@ fn split_challenge(challenge: &FieldElement) -> (FieldElement, FieldElement) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn test_split_challenge_zero() {
         let zero = FieldElement::zero();
@@ -360,21 +447,11 @@ mod tests {
     }
 
     #[test]
-    fn test_poseidon2_sponge_hash_matches_bb() {
-        // Test that our sponge hash of the empty-ish case works.
-        // Hash a single element (the simplest case):
-        // Input: [1]
-        // IV = 1 << 64
-        // state = [0, 0, 0, IV]
-        // After absorb: state = [1, 0, 0, IV]
-        // Permute, output state[0]
+    fn test_poseidon2_sponge_hash_deterministic() {
         let input = [FieldElement::from(1u128)];
-        let result = poseidon2_sponge_hash(&input);
-        assert!(result.is_ok(), "Sponge hash should succeed");
-        // We can't easily verify the exact value without a bb reference,
-        // but we verify it's deterministic
-        let result2 = poseidon2_sponge_hash(&input);
-        assert_eq!(result.unwrap(), result2.unwrap());
+        let result1 = poseidon2_sponge_hash(&input).unwrap();
+        let result2 = poseidon2_sponge_hash(&input).unwrap();
+        assert_eq!(result1, result2, "Sponge hash must be deterministic");
     }
 
     #[test]
@@ -387,12 +464,29 @@ mod tests {
     }
 
     #[test]
+    fn test_phase_id_affects_challenge() {
+        // Same commitment data but different phase_id should produce different challenges.
+        // We test the sponge input directly since KZG is deterministic.
+        let comm_frs = [
+            FieldElement::from(1u128),
+            FieldElement::zero(),
+            FieldElement::from(2u128),
+            FieldElement::zero(),
+        ];
+
+        let input_phase0 =
+            [FieldElement::from(0u128), comm_frs[0], comm_frs[1], comm_frs[2], comm_frs[3]];
+        let input_phase1 =
+            [FieldElement::from(1u128), comm_frs[0], comm_frs[1], comm_frs[2], comm_frs[3]];
+
+        let hash0 = poseidon2_sponge_hash(&input_phase0).unwrap();
+        let hash1 = poseidon2_sponge_hash(&input_phase1).unwrap();
+        assert_ne!(hash0, hash1, "Different phase_ids must produce different challenges");
+    }
+
+    #[test]
     fn test_srs_file_path_uses_home() {
-        // When CRS_PATH is not set, srs_file_path should use $HOME/.bb-crs/
-        // We don't set/unset env vars to avoid unsafe code issues.
-        // Just verify the function returns a path ending in bn254_g1.dat.
         let result = srs_file_path();
-        // If HOME is set (typical), we expect Ok with a path ending in /bn254_g1.dat
         if let Ok(path) = result {
             assert!(
                 path.ends_with("/bn254_g1.dat"),
@@ -400,7 +494,6 @@ mod tests {
                 path
             );
         }
-        // If HOME is not set, it may be an error (that's also acceptable)
     }
 
     // -----------------------------------------------------------------------
@@ -417,7 +510,6 @@ mod tests {
 
     #[test]
     fn test_kzg_commit_single_value() {
-        // commit([1], [G]) = 1 * G = G
         let srs = vec![G1Affine::generator()];
         let values = [FieldElement::from(1u128)];
         let commitment = kzg_commit(&values, &srs).unwrap();
@@ -427,7 +519,6 @@ mod tests {
     #[test]
     fn test_kzg_commit_scalar_multiple() {
         use ark_ec::CurveGroup;
-        // commit([5], [G]) = 5 * G
         let srs = vec![G1Affine::generator()];
         let values = [FieldElement::from(5u128)];
         let commitment = kzg_commit(&values, &srs).unwrap();
@@ -437,51 +528,52 @@ mod tests {
 
     #[test]
     fn test_kzg_commit_multiple_values() {
-        // commit([a, b], [G1, G2]) = a*G1 + b*G2
+        use ark_ec::CurveGroup;
         let srs = synthetic_srs(2);
         let a = FieldElement::from(3u128);
         let b = FieldElement::from(7u128);
         let commitment = kzg_commit(&[a, b], &srs).unwrap();
-
-        // Manual: 3 * G + 7 * (2G) = 3G + 14G = 17G
-        use ark_ec::CurveGroup;
+        // 3 * G + 7 * 2G = 3G + 14G = 17G
         let expected: G1Affine = (G1Affine::generator() * Fr::from(17u64)).into_affine();
         assert_eq!(commitment, expected);
     }
 
     #[test]
     fn test_full_pipeline_deterministic() {
-        // Full pipeline: kzg_commit → encode → hash → split
-        // Verify determinism: same inputs → same output
         let srs = synthetic_srs(3);
         let values =
             [FieldElement::from(42u128), FieldElement::from(123u128), FieldElement::from(999u128)];
 
-        let commitment1 = kzg_commit(&values, &srs).unwrap();
-        let encoded1 = encode_g1_as_fr_elements(&commitment1);
-        let challenges1 = poseidon2_transcript_squeeze(&encoded1, 1).unwrap();
+        let commitment = kzg_commit(&values, &srs).unwrap();
+        let encoded = encode_g1_as_fr_elements(&commitment);
+        let phase_id_fr = FieldElement::from(0u128);
+        let sponge_input = [phase_id_fr, encoded[0], encoded[1], encoded[2], encoded[3]];
+        let ch1 = poseidon2_squeeze_challenges(&sponge_input, 1).unwrap();
 
         let commitment2 = kzg_commit(&values, &srs).unwrap();
         let encoded2 = encode_g1_as_fr_elements(&commitment2);
-        let challenges2 = poseidon2_transcript_squeeze(&encoded2, 1).unwrap();
+        let sponge_input2 = [phase_id_fr, encoded2[0], encoded2[1], encoded2[2], encoded2[3]];
+        let ch2 = poseidon2_squeeze_challenges(&sponge_input2, 1).unwrap();
 
-        assert_eq!(challenges1, challenges2, "Same inputs must produce same challenges");
+        assert_eq!(ch1, ch2, "Same inputs must produce same challenges");
     }
 
     #[test]
     fn test_full_pipeline_different_inputs_different_challenges() {
         let srs = synthetic_srs(2);
+        let phase_id_fr = FieldElement::from(0u128);
 
         let values_a = [FieldElement::from(1u128), FieldElement::from(2u128)];
-        let values_b = [FieldElement::from(3u128), FieldElement::from(4u128)];
-
         let commitment_a = kzg_commit(&values_a, &srs).unwrap();
-        let encoded_a = encode_g1_as_fr_elements(&commitment_a);
-        let ch_a = poseidon2_transcript_squeeze(&encoded_a, 1).unwrap();
+        let enc_a = encode_g1_as_fr_elements(&commitment_a);
+        let input_a = [phase_id_fr, enc_a[0], enc_a[1], enc_a[2], enc_a[3]];
+        let ch_a = poseidon2_squeeze_challenges(&input_a, 1).unwrap();
 
+        let values_b = [FieldElement::from(3u128), FieldElement::from(4u128)];
         let commitment_b = kzg_commit(&values_b, &srs).unwrap();
-        let encoded_b = encode_g1_as_fr_elements(&commitment_b);
-        let ch_b = poseidon2_transcript_squeeze(&encoded_b, 1).unwrap();
+        let enc_b = encode_g1_as_fr_elements(&commitment_b);
+        let input_b = [phase_id_fr, enc_b[0], enc_b[1], enc_b[2], enc_b[3]];
+        let ch_b = poseidon2_squeeze_challenges(&input_b, 1).unwrap();
 
         assert_ne!(ch_a, ch_b, "Different inputs must produce different challenges");
     }
@@ -492,36 +584,37 @@ mod tests {
         let values = [FieldElement::from(42u128), FieldElement::from(99u128)];
         let commitment = kzg_commit(&values, &srs).unwrap();
         let encoded = encode_g1_as_fr_elements(&commitment);
+        let phase_id_fr = FieldElement::from(0u128);
+        let sponge_input = [phase_id_fr, encoded[0], encoded[1], encoded[2], encoded[3]];
 
         // Request 1 challenge
-        let ch1 = poseidon2_transcript_squeeze(&encoded, 1).unwrap();
+        let ch1 = poseidon2_squeeze_challenges(&sponge_input, 1).unwrap();
         assert_eq!(ch1.len(), 1);
 
         // Request 2 challenges (split from single hash)
-        let ch2 = poseidon2_transcript_squeeze(&encoded, 2).unwrap();
+        let ch2 = poseidon2_squeeze_challenges(&sponge_input, 2).unwrap();
         assert_eq!(ch2.len(), 2);
-        // First challenge should be the lo half of the hash, same as ch1[0]
         assert_eq!(ch2[0], ch1[0], "First challenge should match single-challenge result");
         assert_ne!(ch2[0], ch2[1], "Two challenges from same hash should differ");
 
         // Request 3 challenges (needs a second hash round)
-        let ch3 = poseidon2_transcript_squeeze(&encoded, 3).unwrap();
+        let ch3 = poseidon2_squeeze_challenges(&sponge_input, 3).unwrap();
         assert_eq!(ch3.len(), 3);
         assert_eq!(ch3[0], ch2[0], "First challenge stable across request sizes");
         assert_eq!(ch3[1], ch2[1], "Second challenge stable across request sizes");
-        // Third challenge comes from hashing the previous hash output
         assert_ne!(ch3[2], ch3[0]);
         assert_ne!(ch3[2], ch3[1]);
     }
 
     #[test]
     fn test_challenge_values_are_127_bits() {
-        // Every challenge produced should fit in 127 bits (< 2^127)
         let srs = synthetic_srs(2);
         let values = [FieldElement::from(42u128), FieldElement::from(99u128)];
         let commitment = kzg_commit(&values, &srs).unwrap();
         let encoded = encode_g1_as_fr_elements(&commitment);
-        let challenges = poseidon2_transcript_squeeze(&encoded, 4).unwrap();
+        let phase_id_fr = FieldElement::from(0u128);
+        let sponge_input = [phase_id_fr, encoded[0], encoded[1], encoded[2], encoded[3]];
+        let challenges = poseidon2_squeeze_challenges(&sponge_input, 4).unwrap();
 
         let bound_127 = num_bigint::BigUint::from(1u64) << 127u32;
         for (i, ch) in challenges.iter().enumerate() {
@@ -533,14 +626,11 @@ mod tests {
 
     #[test]
     fn test_encode_g1_large_coordinates() {
-        // Use a point with large coordinates (not the generator) to exercise
-        // the limb splitting with nonzero hi parts.
         use ark_ec::CurveGroup;
-        // 12345 * G should have large coordinates
         let point: G1Affine = (G1Affine::generator() * Fr::from(12345u64)).into_affine();
         let encoded = encode_g1_as_fr_elements(&point);
 
-        // Reconstruct x from (x_lo, x_hi) and verify it matches
+        // Reconstruct x from (x_lo, x_hi) and verify
         let x = point.x().unwrap();
         let x_bigint: BigInteger256 = x.into();
         let x_full = num_bigint::BigUint::from_bytes_be(&x_bigint.to_bytes_be());
@@ -573,8 +663,6 @@ mod tests {
         // a meaningful error (not panic).
         let values = [FieldElement::from(1u128)];
         let result = derive_phase_challenge(0, &values, 1);
-        // This will likely fail because the SRS file doesn't exist in test env.
-        // That's expected — just verify we get an error, not a panic.
         if result.is_err() {
             let err_msg = format!("{}", result.unwrap_err());
             assert!(
@@ -583,7 +671,7 @@ mod tests {
                 err_msg
             );
         }
-        // If it somehow succeeds (SRS exists), that's fine too.
+        // If it succeeds (SRS exists in this env), that's fine too.
     }
 
     #[test]
@@ -604,5 +692,22 @@ mod tests {
             err_msg.contains("at least one"),
             "Error should mention needing at least one challenge"
         );
+    }
+
+    #[test]
+    fn test_different_phase_ids_different_challenges() {
+        // Using synthetic SRS to test full pipeline with phase_id variation
+        let srs = synthetic_srs(2);
+        let values = [FieldElement::from(42u128), FieldElement::from(99u128)];
+        let commitment = kzg_commit(&values, &srs).unwrap();
+        let encoded = encode_g1_as_fr_elements(&commitment);
+
+        let input_0 = [FieldElement::from(0u128), encoded[0], encoded[1], encoded[2], encoded[3]];
+        let input_1 = [FieldElement::from(1u128), encoded[0], encoded[1], encoded[2], encoded[3]];
+
+        let ch_0 = poseidon2_squeeze_challenges(&input_0, 1).unwrap();
+        let ch_1 = poseidon2_squeeze_challenges(&input_1, 1).unwrap();
+
+        assert_ne!(ch_0, ch_1, "Different phase_ids must produce different challenges");
     }
 }

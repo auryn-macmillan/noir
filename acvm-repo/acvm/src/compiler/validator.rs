@@ -948,7 +948,20 @@ mod tests {
 
     #[test]
     fn test_phase_barrier_valid() {
-        // PhaseBarrier with committed witnesses w1, w2 and challenge output w3
+        use acvm_blackbox_solver::BlackBoxFunctionSolver;
+
+        let backend = Bn254BlackBoxSolver;
+
+        let commit_values = vec![FieldElement::from(10u128), FieldElement::from(20u128)];
+
+        // Compute the actual challenge the backend would derive.
+        // If the SRS file is not available, derive_phase_challenge returns an error
+        // and the validator skips the challenge value check — use a dummy value.
+        let challenge_value = match backend.derive_phase_challenge(0, &commit_values, 1) {
+            Ok(challenges) => challenges[0],
+            Err(_) => FieldElement::from(42u128), // dummy; validator will skip the check
+        };
+
         let circuit = make_circuit(vec![Opcode::PhaseBarrier {
             phase_id: 0,
             commit_witnesses: vec![Witness(1), Witness(2)],
@@ -956,14 +969,11 @@ mod tests {
         }]);
 
         let witness_map = WitnessMap::from(BTreeMap::from_iter([
-            (Witness(1), FieldElement::from(10u128)),
-            (Witness(2), FieldElement::from(20u128)),
-            (Witness(3), FieldElement::from(42u128)), // challenge injected by backend
+            (Witness(1), commit_values[0]),
+            (Witness(2), commit_values[1]),
+            (Witness(3), challenge_value),
         ]));
 
-        // StubbedBlackBoxSolver's derive_phase_challenge returns an error (unsupported),
-        // so the validator skips the challenge value check and only checks structural validity.
-        let backend = Bn254BlackBoxSolver;
         assert!(validate_witness(&backend, witness_map, &circuit).is_ok());
     }
 
