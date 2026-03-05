@@ -792,3 +792,118 @@ A comprehensive code review was performed after Phases A–D were implemented. 1
 - C++ ultra_honk_tests: 260 passed, 5 skipped, 0 failed
 - C++ dsl_tests (non-recursive): 467 passed, 2 skipped, 0 failed
 - C++ dsl_tests (recursive spot-check): HypernovaRecursionConstraintTest.RecursiveVerifierAppCircuit passed
+
+## 9. Phase E — Enclave Circuit Migration Plan
+
+### 9.1 Design Decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Challenge payload | **Option A: Include everything** (commitment digests + polynomial data) | Preserves transcript structure, minimal risk |
+| Cross-circuit commitments | **Raw Poseidon2** (no SAFE/Keccak) | Eliminates 150K/instance Keccak tag; total cross-circuit cost drops from ~4.15M to ~250-300K |
+| Challenge derivation | **`std::phase::challenge()`** | Backend-derived via KZG + standalone Poseidon2 sponge; zero in-circuit hashing |
+
+### 9.2 Circuit Classification
+
+#### Circuits with Fiat-Shamir challenges (replace with `std::phase::challenge()`)
+
+| Circuit | Challenge Function | Est. Savings |
+|---|---|---|
+| DKG `share_encryption` | `compute_share_encryption_challenge<L>` | ~300K+ |
+| Threshold `pk_generation` | `compute_threshold_pk_challenge` | ~200K+ |
+| Threshold `share_decryption` | `compute_threshold_share_decryption_challenge<L>` | ~250K+ |
+| Threshold `user_data_encryption_ct0` | `compute_user_data_encryption_ct0_challenge<L>` | ~200K+ |
+| Threshold `user_data_encryption_ct1` | `compute_user_data_encryption_ct1_challenge<L>` | ~200K+ |
+
+#### Circuits with only cross-circuit commitments (replace SAFE → raw Poseidon2)
+
+| Circuit | Commitment Functions | Sponge Instances | Est. Savings |
+|---|---|---|---|
+| DKG `pk` | `compute_dkg_pk_commitment` | 1 | ~150K |
+| DKG `sk_share_computation` | sk_commitment + 5× share_commitments | 6 | ~900K |
+| DKG `e_sm_share_computation` | e_sm_commitment + 5× share_commitments | 6 | ~900K |
+| DKG `share_decryption` | H×L verify + aggregated_shares | 2+ | ~300K+ |
+| Threshold `pk_aggregation` | H× pk verify + agg_pk (3 nested) | H+3 | ~600K+ |
+| All recursive wrappers | recursive_agg + vk_hash commitments | 1-2 each | ~150-300K each |
+
+#### Circuits with no hashing (no changes needed)
+
+- `decrypted_shares_aggregation_bn`
+- `decrypted_shares_aggregation_mod`
+
+### 9.3 Cross-Circuit Commitment Flow
+
+```
+pk_generation ──pk_commitment──▶ pk_aggregation ──agg_pk_commitment──▶ wrappers
+     │                                                                      │
+     ├──sk_commitment──▶ share_decryption                                   │
+     │                                                                      │
+     └──e_sm_commitment──▶ share_decryption                                 │
+                                                                            │
+user_data_encryption_ct0 ──commitments──▶ wrapper/user_data_encryption ─────┘
+user_data_encryption_ct1 ──commitments──┘      (u_commitment equality check)
+```
+
+All cross-circuit commitments switch from SAFE sponge (Poseidon2 + Keccak tag) to raw Poseidon2 hash. Both producers and consumers must be updated together.
+
+### 9.4 Implementation Steps
+
+#### E.3a: Update Enclave Dependencies
+- Point `crates/zk-prover/Cargo.toml` Noir crates to our fork (branch `am/multi-phase-circuits`)
+- Update `NOIR_TOOLCHAIN` in CI to match our fork's version
+- Update `BB_VERSION` to our aztec-packages fork
+- Update `bb_proof_verification` dependency in recursive aggregation circuits
+- Ensure `poseidon`, `keccak256`, `bignum` libraries are compatible with updated compiler
+
+#### E.3b: Create Raw Poseidon2 Commitment Functions
+- Add a new module `circuits/lib/src/math/poseidon2_commitment.nr`
+- Implement `poseidon2_hash(inputs: [Field]) -> Field` using raw Poseidon2 permutation (rate=3, no SAFE wrapper, no Keccak tag)
+- Include domain separator as a Field element prefix (cheap: just 1 extra field absorbed)
+- Create drop-in replacement functions matching existing commitment API signatures
+- **Key**: these must be deterministic and backend-independent (pure Poseidon2)
+
+#### E.3c: Replace Challenge Derivation (5 circuits)
+For each of the 5 circuits with Fiat-Shamir challenges:
+1. Collect the same payload data that was previously absorbed into the SAFE sponge
+2. Pass it to `std::phase::challenge()` (or `challenge_multi()` for multi-challenge)
+3. Remove the `compute_*_challenge()` call
+4. The polynomial evaluation and Schwartz-Zippel checks remain unchanged
+
+**Important**: The challenge payload includes commitment digests (from cross-circuit commitments computed in the same circuit). These commitment digests must be computed BEFORE the phase barrier, using the new raw Poseidon2 functions. The phase barrier then commits to the full payload including those digests.
+
+#### E.3d: Replace Cross-Circuit Commitments
+For all commitment-producing and commitment-consuming circuits:
+1. Replace `compute_*_commitment()` calls with new raw Poseidon2 equivalents
+2. Ensure domain separators are preserved (as Field prefixes instead of Keccak tags)
+3. Update assertion equality checks in consumer circuits
+
+#### E.3e: Update Recursive Aggregation Wrappers
+- The wrapper circuits (`fold`, `wrapper/*`) use commitment functions for cross-proof linking
+- Replace their commitment calls with raw Poseidon2 equivalents
+- Update `bb_proof_verification` dependency
+
+### 9.5 Version Compatibility
+
+- Enclave currently uses Noir `v1.0.0-beta.16`
+- Our fork is at `v1.0.0-beta.19` + multi-phase commits
+- 484 commits between beta.16 and beta.19 may include breaking changes
+- Migration must handle any API changes in ACIR serialization, stdlib, or compiler
+
+### 9.6 Constraint Cost Analysis (Insecure Preset, N=512)
+
+| Commitment | Sponge Instances | Fields Absorbed | Current Cost | After (raw Poseidon2) |
+|---|---|---|---|---|
+| DKG PK | 1 | 256 | 176K | ~26K |
+| Share Enc. (message) | 1 | 86 | 159K | ~9K |
+| Share Comp. SK | 1 | 17 | 152K | ~2K |
+| Share Comp. E_SM | 1 | 57 | 156K | ~6K |
+| Threshold PK | 1 | 344 | 185K | ~35K |
+| PK Aggregation (nested) | 3 | 346 | 486K | ~36K |
+| Aggregated Shares (SK+E_SM) | 2 | 344 | 335K | ~35K |
+| Share Enc. (shares, ×5) | 5 | 2570 | 1,010K | ~260K |
+| User Data Enc. CT0 (4 commits) | 4 | 386 | 641K | ~41K |
+| User Data Enc. CT1 (3 commits) | 3 | 361 | 488K | ~38K |
+| **Total** | **~25** | — | **~3.79M** | **~488K** |
+
+Savings from commitment migration alone: **~3.3M constraints** (87% reduction).
+Combined with challenge migration (eliminating ~1.2M+ in challenge sponges): **~4.5M+ total savings**.
