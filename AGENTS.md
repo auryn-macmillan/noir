@@ -862,7 +862,9 @@ All cross-circuit commitments switch from SAFE sponge (Poseidon2 + Keccak tag) t
 - Create drop-in replacement functions matching existing commitment API signatures
 - **Key**: these must be deterministic and backend-independent (pure Poseidon2)
 
-#### E.3c: Replace Challenge Derivation (5 circuits)
+#### E.3c: Replace Challenge Derivation (5 circuits) — COMPLETE
+Commit: `4043d677 feat: replace Fiat-Shamir challenge derivation with std::phase::challenge in 5 circuits`
+
 For each of the 5 circuits with Fiat-Shamir challenges:
 1. Collect the same payload data that was previously absorbed into the SAFE sponge
 2. Pass it to `std::phase::challenge()` (or `challenge_multi()` for multi-challenge)
@@ -871,16 +873,24 @@ For each of the 5 circuits with Fiat-Shamir challenges:
 
 **Important**: The challenge payload includes commitment digests (from cross-circuit commitments computed in the same circuit). These commitment digests must be computed BEFORE the phase barrier, using the new raw Poseidon2 functions. The phase barrier then commits to the full payload including those digests.
 
-#### E.3d: Replace Cross-Circuit Commitments
+#### E.3d: Replace Cross-Circuit Commitments — COMPLETE
+Commit: `e531f500 feat: replace SAFE sponge commitments with raw Poseidon2 in all 19 circuit files`
+
 For all commitment-producing and commitment-consuming circuits:
 1. Replace `compute_*_commitment()` calls with new raw Poseidon2 equivalents
 2. Ensure domain separators are preserved (as Field prefixes instead of Keccak tags)
 3. Update assertion equality checks in consumer circuits
 
-#### E.3e: Update Recursive Aggregation Wrappers
-- The wrapper circuits (`fold`, `wrapper/*`) use commitment functions for cross-proof linking
-- Replace their commitment calls with raw Poseidon2 equivalents
-- Update `bb_proof_verification` dependency
+All 19 circuit files updated (9 core library + 10 recursive aggregation wrappers).
+`commitments.nr` stripped to domain separator constants only; all SAFE sponge
+commitment functions removed as dead code. Domain separators re-exported via
+`pub use` from `poseidon2_commitment.nr`.
+
+#### E.3e: Update Recursive Aggregation Wrappers — COMPLETE (merged into E.3d)
+All 10 recursive aggregation wrappers were updated as part of E.3d:
+- 8 wrapper `main.nr` files: `compute_recursive_aggregation_commitment`
+- `user_data_encryption/main.nr`: `compute_commitment`, `DS_CIPHERTEXT`, `DS_PK_AGGREGATION`
+- `fold/main.nr`: `compute_recursive_aggregation_commitment`, `compute_vk_hash`
 
 ### 9.5 Version Compatibility
 
