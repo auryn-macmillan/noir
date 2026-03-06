@@ -997,8 +997,27 @@ In insecure mode, each SAFE sponge instance had ~1 Keccak opcode (~50K gates) + 
 - Switch config to secure mode, recompile all 12 circuits, collect `nargo info` + `bb gates`
 - Compare against secure baseline from Section 9.7
 
-#### E.4: End-to-end proving/verifying test
-- bb binary now builds successfully (msgpack issue fixed)
-- Need witness data (Prover.toml) for at least one circuit
-- Test: compile → execute → prove → verify for a multi-phase circuit
-- Test: recursive verification of a multi-phase proof
+#### E.4: End-to-end proving/verifying test — COMPLETE
+
+Successfully tested the full compile → execute → prove → verify pipeline:
+
+**Multi-phase circuit (`threshold/pk_generation`):**
+1. ✅ Generated witness via `zk_cli --circuit pk-generation --preset insecure`
+2. ✅ `nargo execute --package pk_generation` — PhaseBarrier executed successfully (KGC commit + Poseidon2 challenge derivation)
+3. ✅ `bb prove` — Proof generated (Oink prover committed to phase barrier witness polynomial)
+4. ✅ `bb verify` — "Proof verified successfully" (verifier reconstructed transcript with phase barrier commitments)
+
+**Non-challenge circuit (`dkg/pk`):**
+1. ✅ Generated witness via `zk_cli --circuit pk --preset insecure`
+2. ✅ `nargo execute --package pk` — Executed successfully (no phase barrier)
+3. ✅ `bb prove` — Proof generated
+4. ✅ `bb verify` — "Proof verified successfully"
+
+**Known limitation**: Other circuits (`share_encryption`, `share_decryption`, etc.) fail during `nargo execute` with commitment mismatch assertions. This is because `zk_cli` (Rust) computes `expected_*_commitment` values using the old SAFE sponge algorithm, but the circuits now use raw Poseidon2. The fix requires updating the Rust witness generation code in `zk_cli` to use the same raw Poseidon2 hash — this is a Rust-side change, not a circuit or compiler issue.
+
+**Recursive verification**: Not yet tested. Requires a circuit that recursively verifies a multi-phase proof (e.g., the Enclave aggregation wrappers). This depends on having valid witnesses for the inner proofs, which is blocked by the commitment mismatch issue above.
+
+#### Summary of remaining work
+- Update `zk_cli` Rust code to use raw Poseidon2 for commitment computation (unblocks full E.4 testing)
+- Secure-mode benchmarks (E.5 continued)
+- Recursive verification test (requires updated `zk_cli`)
