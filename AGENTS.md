@@ -997,27 +997,33 @@ In insecure mode, each SAFE sponge instance had ~1 Keccak opcode (~50K gates) + 
 - Switch config to secure mode, recompile all 12 circuits, collect `nargo info` + `bb gates`
 - Compare against secure baseline from Section 9.7
 
-#### E.4: End-to-end proving/verifying test — COMPLETE
+#### E.4: End-to-end proving/verifying test — COMPLETE (ALL 12 CIRCUITS)
 
-Successfully tested the full compile → execute → prove → verify pipeline:
+Successfully tested the full compile → execute → prove → verify pipeline for **all 12 circuits** in insecure mode.
 
-**Multi-phase circuit (`threshold/pk_generation`):**
-1. ✅ Generated witness via `zk_cli --circuit pk-generation --preset insecure`
-2. ✅ `nargo execute --package pk_generation` — PhaseBarrier executed successfully (KGC commit + Poseidon2 challenge derivation)
-3. ✅ `bb prove` — Proof generated (Oink prover committed to phase barrier witness polynomial)
-4. ✅ `bb verify` — "Proof verified successfully" (verifier reconstructed transcript with phase barrier commitments)
+**Rust witness generation**: Migrated `zk_cli` commitment functions from SAFE sponge to raw Poseidon2, matching Noir circuit implementations exactly. All 75 unit tests pass. Committed as `47e1d46b feat: migrate Rust witness generation to raw Poseidon2 commitments`.
 
-**Non-challenge circuit (`dkg/pk`):**
-1. ✅ Generated witness via `zk_cli --circuit pk --preset insecure`
-2. ✅ `nargo execute --package pk` — Executed successfully (no phase barrier)
-3. ✅ `bb prove` — Proof generated
-4. ✅ `bb verify` — "Proof verified successfully"
+**Full pipeline results (insecure mode, N=512):**
 
-**Known limitation**: Other circuits (`share_encryption`, `share_decryption`, etc.) fail during `nargo execute` with commitment mismatch assertions. This is because `zk_cli` (Rust) computes `expected_*_commitment` values using the old SAFE sponge algorithm, but the circuits now use raw Poseidon2. The fix requires updating the Rust witness generation code in `zk_cli` to use the same raw Poseidon2 hash — this is a Rust-side change, not a circuit or compiler issue.
+| Circuit | Workspace | Phase Challenge | zk_cli | nargo execute | bb prove | bb verify |
+|---|---|---|---|---|---|---|
+| dkg/pk | dkg | No | ✅ | ✅ | ✅ | ✅ |
+| dkg/sk_share_computation | dkg | No | ✅ | ✅ | ✅ | ✅ |
+| dkg/e_sm_share_computation | dkg | No | ✅ | ✅ | ✅ | ✅ |
+| dkg/share_encryption | dkg | Yes | ✅ | ✅ | ✅ | ✅ |
+| dkg/share_decryption | dkg | No | ✅ | ✅ | ✅ | ✅ |
+| threshold/pk_generation | threshold | Yes | ✅ | ✅ | ✅ | ✅ |
+| threshold/share_decryption | threshold | Yes | ✅ | ✅ | ✅ | ✅ |
+| threshold/pk_aggregation | threshold | No | ✅ | ✅ | ✅ | ✅ |
+| threshold/user_data_encryption_ct0 | threshold | Yes | ✅ | ✅ | ✅ | ✅ |
+| threshold/user_data_encryption_ct1 | threshold | Yes | ✅ | ✅ | ✅ | ✅ |
+| threshold/decrypted_shares_aggregation_bn | threshold | No | ✅ | ✅ | ✅ | ✅ |
+| threshold/decrypted_shares_aggregation_mod | threshold | No | ✅ | ✅ | ✅ | ✅ |
 
-**Recursive verification**: Not yet tested. Requires a circuit that recursively verifies a multi-phase proof (e.g., the Enclave aggregation wrappers). This depends on having valid witnesses for the inner proofs, which is blocked by the commitment mismatch issue above.
+All 5 phase-challenge circuits (share_encryption, pk_generation, share_decryption/threshold, user_data_encryption_ct0, user_data_encryption_ct1) successfully execute PhaseBarrier during witness generation (KZG commit + standalone Poseidon2 challenge derivation) and produce valid proofs that verify correctly.
+
+**Recursive verification**: Not yet tested. Requires generating valid inner proofs and feeding them to the recursive aggregation wrapper circuits. The infrastructure is now unblocked (all inner circuits produce valid proofs), but the recursive wrappers need additional witness data (inner proof bytes, VK) that the current `zk_cli` does not generate.
 
 #### Summary of remaining work
-- Update `zk_cli` Rust code to use raw Poseidon2 for commitment computation (unblocks full E.4 testing)
 - Secure-mode benchmarks (E.5 continued)
-- Recursive verification test (requires updated `zk_cli`)
+- Recursive verification test (inner proofs now available; needs wrapper witness generation)
