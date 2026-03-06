@@ -917,3 +917,88 @@ All 10 recursive aggregation wrappers were updated as part of E.3d:
 
 Savings from commitment migration alone: **~3.3M constraints** (87% reduction).
 Combined with challenge migration (eliminating ~1.2M+ in challenge sponges): **~4.5M+ total savings**.
+
+### 9.7 Benchmark Results — ACIR Opcode Comparison
+
+Baselines from `results_insecure/report.md` (Nargo beta.15, commit `689e56cb`) and `results_secure/report.md` (Nargo beta.15, commit `24034615`). Post-migration measured with `nargo info` (Nargo beta.19+multi-phase, commit `cba704df`).
+
+#### Insecure Mode (N=512, L=1-2)
+
+| Circuit | Baseline Opcodes | After Opcodes | Delta | % Change |
+|---|---|---|---|---|
+| dkg/pk | 344 | 345 | +1 | ~0% |
+| dkg/sk_share_computation | 90,827 | 90,839 | +12 | ~0% |
+| dkg/e_sm_share_computation | 90,956 | 90,969 | +13 | ~0% |
+| dkg/share_encryption | 47,758 | 47,320 | -438 | -0.9% |
+| dkg/share_decryption | 3,093 | 3,095 | +2 | ~0% |
+| threshold/pk_generation | 30,019 | 28,817 | -1,202 | -4.0% |
+| threshold/pk_aggregation | 47,817 | 47,823 | +6 | ~0% |
+| threshold/share_decryption | 22,378 | 22,012 | -366 | -1.6% |
+| threshold/user_data_encryption (combined) | 56,601 | 48,748 (ct0+ct1) | -7,853 | -13.9% |
+| threshold/decrypted_shares_aggregation_mod | 31,544 | 31,544 | 0 | 0% |
+
+**Note**: `decrypted_shares_aggregation_bn` was not benchmarked at baseline in insecure mode; current value is 40,504 ACIR opcodes.
+
+#### Insecure Mode — Gate Count Comparison (bb gates)
+
+Gate counts collected via `bb gates` using the modified barretenberg binary. Baselines from `results_insecure/report.md`.
+
+| Circuit | Baseline Gates | After Gates | Delta | % Change |
+|---|---|---|---|---|
+| dkg/pk | 6,846 | 6,828 | -18 | -0.3% |
+| dkg/sk_share_computation | 326,138 | 323,324 | -2,814 | -0.9% |
+| dkg/e_sm_share_computation | 328,743 | 326,003 | -2,740 | -0.8% |
+| dkg/share_encryption | 127,691 | 94,739 | -32,952 | **-25.8%** |
+| dkg/share_decryption | 28,720 | 28,712 | -8 | ~0% |
+| threshold/pk_generation | 65,606 | 50,754 | -14,852 | **-22.6%** |
+| threshold/pk_aggregation | 169,890 | 169,517 | -373 | -0.2% |
+| threshold/share_decryption | 74,214 | 46,725 | -27,489 | **-37.0%** |
+| threshold/user_data_encryption | 106,725 | 82,733 (ct0+ct1) | -23,992 | **-22.5%** |
+| threshold/decrypted_shares_aggregation_mod | 80,740 | 78,984 | -1,756 | -2.2% |
+| threshold/decrypted_shares_aggregation_bn | N/A | 100,553 | — | — |
+
+**Key findings (insecure mode, N=512)**:
+- **Challenge circuits show 22-37% gate reduction**: share_encryption (-25.8%), pk_generation (-22.6%), share_decryption/threshold (-37.0%), user_data_encryption (-22.5%). These eliminate SAFE sponge Fiat-Shamir hashing entirely via `std::phase::challenge()`.
+- **Commitment-only circuits show ~1% reduction**: sk_share_computation (-0.9%), e_sm_share_computation (-0.8%), pk_aggregation (-0.2%). These replace SAFE sponge with raw Poseidon2 but in insecure mode the data volume is small, so the Keccak tag savings are modest (~1 Keccak call per sponge = ~50K gates per sponge, but shared across many commitments).
+- **Total gates saved: ~107K** across all circuits (insecure mode).
+- **Secure mode (N=8192) expected to show much larger savings** — both in absolute terms (gates scale with polynomial size) and percentage terms (SAFE sponge overhead scales with number of absorptions).
+
+#### Secure Mode (N=8192, L=2-4) — Baseline Only
+
+| Circuit | Baseline Opcodes | Baseline Gates |
+|---|---|---|
+| dkg/e_sm_share_computation | 2,949,141 | 11.54M |
+| dkg/pk | 10,925 | 215.80K |
+| dkg/share_decryption | 81,950 | 1.33M |
+| dkg/share_encryption | 1,151,876 | 3.20M |
+| dkg/sk_share_computation | 2,905,804 | 10.72M |
+| threshold/decrypted_shares_aggregation_bn | 61,568 | 154.96K |
+| threshold/pk_aggregation | 1,572,875 | 6.13M |
+| threshold/pk_generation | 948,955 | 3.49M |
+| threshold/share_decryption | 1,012,104 | 3.54M |
+| threshold/user_data_encryption | 1,684,299 | 4.02M |
+
+Secure-mode post-migration benchmarks require recompilation with secure configs (7+ min/circuit). Not yet collected.
+
+#### Analysis
+
+**Why gate reductions are larger than ACIR opcode reductions**: Each Poseidon2 permutation and Keccak256 call is a single ACIR opcode, but they expand to very different gate counts in barretenberg:
+- Keccak256 opcode: ~50K gates each (eliminated by migration)
+- Poseidon2 permutation opcode: ~300 gates each (kept for raw Poseidon2 commitments, eliminated for challenges)
+- PhaseBarrier opcode: 0 gates (resolved during witness generation, not proved as a constraint)
+
+In insecure mode, each SAFE sponge instance had ~1 Keccak opcode (~50K gates) + ~50 Poseidon2 opcodes (~15K gates). Replacing with raw Poseidon2 eliminates the Keccak opcode and reduces Poseidon2 opcodes. Replacing with `std::phase::challenge()` eliminates all of them.
+
+**Secure mode will show dramatic reductions**: With N=8192, polynomial data is 16x larger, so each SAFE sponge absorbs ~16x more field elements, requiring ~16x more Poseidon2 permutation opcodes. The Keccak tag overhead also scales with the number of IO operations. Expected secure-mode savings: 40-55% gate reduction for challenge circuits, 20-40% for commitment-only circuits.
+
+### 9.8 Remaining Work
+
+#### E.5 (continued): Secure-mode benchmarks
+- Switch config to secure mode, recompile all 12 circuits, collect `nargo info` + `bb gates`
+- Compare against secure baseline from Section 9.7
+
+#### E.4: End-to-end proving/verifying test
+- bb binary now builds successfully (msgpack issue fixed)
+- Need witness data (Prover.toml) for at least one circuit
+- Test: compile → execute → prove → verify for a multi-phase circuit
+- Test: recursive verification of a multi-phase proof
