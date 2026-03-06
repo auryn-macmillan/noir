@@ -145,6 +145,14 @@ pub enum Intrinsic {
     /// argument: array of Field elements to commit to
     /// result: an array of Field challenges derived by the backend.
     PhaseChallengeMulti,
+    /// PhaseChallengeSlice - Like PhaseChallenge but accepts a slice (vector) instead of a fixed-size array.
+    /// argument: slice/vector of Field elements to commit to
+    /// result: a single Field challenge derived by the backend.
+    PhaseChallengeSlice,
+    /// PhaseChallengeMultiSlice - Like PhaseChallengeMulti but accepts a slice (vector).
+    /// argument: slice/vector of Field elements to commit to
+    /// result: an array of Field challenges derived by the backend.
+    PhaseChallengeMultiSlice,
 }
 
 impl std::fmt::Display for Intrinsic {
@@ -177,6 +185,8 @@ impl std::fmt::Display for Intrinsic {
             Intrinsic::VectorRefCount => write!(f, "vector_refcount"),
             Intrinsic::PhaseChallenge => write!(f, "phase_challenge"),
             Intrinsic::PhaseChallengeMulti => write!(f, "phase_challenge_multi"),
+            Intrinsic::PhaseChallengeSlice => write!(f, "phase_challenge_slice"),
+            Intrinsic::PhaseChallengeMultiSlice => write!(f, "phase_challenge_multi_slice"),
         }
     }
 }
@@ -199,7 +209,9 @@ impl Intrinsic {
             | Intrinsic::VectorRefCount
             | Intrinsic::AsWitness
             | Intrinsic::PhaseChallenge
-            | Intrinsic::PhaseChallengeMulti => true,
+            | Intrinsic::PhaseChallengeMulti
+            | Intrinsic::PhaseChallengeSlice
+            | Intrinsic::PhaseChallengeMultiSlice => true,
 
             // These apply a constraint that the input must fit into a specified number of limbs.
             Intrinsic::ToBits(_) | Intrinsic::ToRadix(_) => true,
@@ -302,6 +314,8 @@ impl Intrinsic {
             "vector_refcount" => Some(Intrinsic::VectorRefCount),
             "phase_challenge" => Some(Intrinsic::PhaseChallenge),
             "phase_challenge_multi" => Some(Intrinsic::PhaseChallengeMulti),
+            "phase_challenge_slice" => Some(Intrinsic::PhaseChallengeSlice),
+            "phase_challenge_multi_slice" => Some(Intrinsic::PhaseChallengeMultiSlice),
 
             other => BlackBoxFunc::lookup(other).map(Intrinsic::BlackBox),
         }

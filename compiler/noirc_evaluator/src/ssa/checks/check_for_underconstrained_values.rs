@@ -516,7 +516,9 @@ impl DependencyContext {
                                 | Intrinsic::ToRadix(..)
                                 | Intrinsic::FieldLessThan
                                 | Intrinsic::PhaseChallenge
-                                | Intrinsic::PhaseChallengeMulti => {
+                                | Intrinsic::PhaseChallengeMulti
+                                | Intrinsic::PhaseChallengeSlice
+                                | Intrinsic::PhaseChallengeMultiSlice => {
                                     // Record all the function arguments as parents of the results
                                     self.update_children(&arguments, &results);
                                 }
@@ -832,7 +834,9 @@ impl Context {
                             | Intrinsic::ToRadix(..)
                             | Intrinsic::FieldLessThan
                             | Intrinsic::PhaseChallenge
-                            | Intrinsic::PhaseChallengeMulti => {
+                            | Intrinsic::PhaseChallengeMulti
+                            | Intrinsic::PhaseChallengeSlice
+                            | Intrinsic::PhaseChallengeMultiSlice => {
                                 self.value_sets.push(instruction_arguments_and_results);
                             }
                         },

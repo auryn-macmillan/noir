@@ -481,7 +481,10 @@ impl<W: Write> Interpreter<'_, W> {
                 let rhs = self.lookup_field(args[1], "rhs of call to field less than")?;
                 Ok(vec![Value::bool(lhs < rhs)])
             }
-            Intrinsic::PhaseChallenge | Intrinsic::PhaseChallengeMulti => {
+            Intrinsic::PhaseChallenge
+            | Intrinsic::PhaseChallengeMulti
+            | Intrinsic::PhaseChallengeSlice
+            | Intrinsic::PhaseChallengeMultiSlice => {
                 // Phase challenge intrinsics require backend interaction and cannot
                 // be evaluated in the SSA interpreter.
                 Err(InterpreterError::Internal(InternalError::UnexpectedInstruction {

@@ -648,9 +648,36 @@ impl<'f> Validator<'f> {
                 let argument_type = self.assert_one_argument(arguments, "PhaseChallengeMulti");
                 assert_field_array(&argument_type, "PhaseChallengeMulti witnesses");
 
-                let result_type =
-                    self.assert_one_result(instruction, "PhaseChallengeMulti");
+                let result_type = self.assert_one_result(instruction, "PhaseChallengeMulti");
                 assert_field_array(&result_type, "PhaseChallengeMulti result");
+            }
+            Intrinsic::PhaseChallengeSlice => {
+                // fn challenge_slice(witnesses: [Field]) -> Field {}
+                // Slice intrinsics receive (length, vector) as two arguments
+                let (length_type, vector_type) =
+                    self.assert_two_arguments(arguments, "PhaseChallengeSlice");
+                assert_u32(&length_type, "PhaseChallengeSlice length");
+                assert!(
+                    matches!(&vector_type, Type::Vector(element_types) if element_types.len() == 1 && matches!(element_types[0], Type::Numeric(NumericType::NativeField))),
+                    "PhaseChallengeSlice witnesses must be a vector of Field, found {vector_type}"
+                );
+
+                let result_type = self.assert_one_result(instruction, "PhaseChallengeSlice");
+                assert_field(&result_type, "PhaseChallengeSlice result");
+            }
+            Intrinsic::PhaseChallengeMultiSlice => {
+                // fn challenge_multi_slice<let M: u32>(witnesses: [Field]) -> [Field; M] {}
+                // Slice intrinsics receive (length, vector) as two arguments
+                let (length_type, vector_type) =
+                    self.assert_two_arguments(arguments, "PhaseChallengeMultiSlice");
+                assert_u32(&length_type, "PhaseChallengeMultiSlice length");
+                assert!(
+                    matches!(&vector_type, Type::Vector(element_types) if element_types.len() == 1 && matches!(element_types[0], Type::Numeric(NumericType::NativeField))),
+                    "PhaseChallengeMultiSlice witnesses must be a vector of Field, found {vector_type}"
+                );
+
+                let result_type = self.assert_one_result(instruction, "PhaseChallengeMultiSlice");
+                assert_field_array(&result_type, "PhaseChallengeMultiSlice result");
             }
         }
     }

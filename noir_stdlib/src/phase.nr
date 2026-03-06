@@ -42,3 +42,49 @@ pub fn challenge<let N: u32>(witnesses: [Field; N]) -> Field {}
 /// in the Enclave PVSS scheme).
 #[builtin(phase_challenge_multi)]
 pub fn challenge_multi<let N: u32, let M: u32>(witnesses: [Field; N]) -> [Field; M] {}
+
+/// Like `challenge`, but accepts a dynamically-sized vector (`[Field]`)
+/// instead of a fixed-size array.
+///
+/// Use this when the witness payload size depends on generic parameters
+/// and computing the exact array length as a compile-time type expression
+/// would be impractical or cause compiler performance issues.
+///
+/// # Example
+///
+/// ```noir
+/// use std::phase::challenge_slice;
+///
+/// fn main(poly_coeffs: [Field; 1024], extra: [Field; 256]) {
+///     let mut payload: [Field] = &[];
+///     for c in poly_coeffs { payload = payload.push_back(c); }
+///     for e in extra { payload = payload.push_back(e); }
+///     let gamma = challenge_slice(payload);
+///     // ... use gamma for polynomial evaluation ...
+/// }
+/// ```
+#[builtin(phase_challenge_slice)]
+pub fn challenge_slice(witnesses: [Field]) -> Field {}
+
+/// Like `challenge_multi`, but accepts a dynamically-sized vector
+/// (`[Field]`) instead of a fixed-size array.
+///
+/// Use this when the witness payload size depends on generic parameters
+/// and computing the exact array length as a compile-time type expression
+/// would be impractical or cause compiler performance issues.
+///
+/// # Example
+///
+/// ```noir
+/// use std::phase::challenge_multi_slice;
+///
+/// fn main(poly_coeffs: [Field; 1024], extra: [Field; 256]) {
+///     let mut payload: [Field] = &[];
+///     for c in poly_coeffs { payload = payload.push_back(c); }
+///     for e in extra { payload = payload.push_back(e); }
+///     let challenges: [Field; 3] = challenge_multi_slice(payload);
+///     // ... use challenges for polynomial evaluations ...
+/// }
+/// ```
+#[builtin(phase_challenge_multi_slice)]
+pub fn challenge_multi_slice<let M: u32>(witnesses: [Field]) -> [Field; M] {}

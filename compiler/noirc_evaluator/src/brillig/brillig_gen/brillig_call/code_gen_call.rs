@@ -338,7 +338,10 @@ impl<Registers: RegisterAllocator> BrilligBlock<'_, Registers> {
                     Intrinsic::DerivePedersenGenerators => {
                         unreachable!("unsupported function call type {:?}", dfg[func])
                     }
-                    Intrinsic::PhaseChallenge | Intrinsic::PhaseChallengeMulti => {
+                    Intrinsic::PhaseChallenge
+                    | Intrinsic::PhaseChallengeMulti
+                    | Intrinsic::PhaseChallengeSlice
+                    | Intrinsic::PhaseChallengeMultiSlice => {
                         unreachable!(
                             "ICE: PhaseChallenge intrinsics cannot be used in unconstrained (Brillig) context"
                         )

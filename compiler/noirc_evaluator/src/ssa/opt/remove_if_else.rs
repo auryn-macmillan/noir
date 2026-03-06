@@ -485,7 +485,9 @@ impl Context {
             | Intrinsic::VectorRefCount
             | Intrinsic::FieldLessThan
             | Intrinsic::PhaseChallenge
-            | Intrinsic::PhaseChallengeMulti => SizeChange::None,
+            | Intrinsic::PhaseChallengeMulti
+            | Intrinsic::PhaseChallengeSlice
+            | Intrinsic::PhaseChallengeMultiSlice => SizeChange::None,
         }
     }
 }

@@ -987,7 +987,9 @@ impl<'f> Context<'f> {
             | Intrinsic::ArrayRefCount
             | Intrinsic::VectorRefCount
             | Intrinsic::PhaseChallenge
-            | Intrinsic::PhaseChallengeMulti => arguments,
+            | Intrinsic::PhaseChallengeMulti
+            | Intrinsic::PhaseChallengeSlice
+            | Intrinsic::PhaseChallengeMultiSlice => arguments,
         }
     }
 

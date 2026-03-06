@@ -61,6 +61,63 @@ fn phase_challenge_multi_emits_phase_barrier_with_multiple_outputs() {
 }
 
 #[test]
+fn phase_challenge_slice_emits_phase_barrier() {
+    // PhaseChallengeSlice accepts a vector (length + data) and emits
+    // a PHASE_BARRIER with the vector's elements as commit_witnesses.
+    let src = "
+    acir(inline) fn main f0 {
+      b0(v0: Field, v1: Field):
+        v2 = make_array [v0, v1] : [Field]
+        v3 = call phase_challenge_slice(u32 2, v2) -> Field
+        constrain v3 == v0
+        return
+    }
+    ";
+    let program = ssa_to_acir_program(src);
+
+    // w0 and w1 are input witnesses. The slice has length 2 with data [w0, w1].
+    // Phase barrier commits to [w0, w1] and outputs w2 (the challenge).
+    // Then ASSERT w2 = w0 from the constrain.
+    assert_circuit_snapshot!(program, @r"
+    func 0
+    private parameters: [w0, w1]
+    public parameters: []
+    return values: []
+    PHASE_BARRIER phase: 0, commits: [w0, w1], outputs: [w2]
+    ASSERT w2 = w0
+    ");
+}
+
+#[test]
+fn phase_challenge_multi_slice_emits_phase_barrier_with_multiple_outputs() {
+    // PhaseChallengeMultiSlice accepts a vector and emits a PHASE_BARRIER
+    // with multiple challenge output witnesses.
+    let src = "
+    acir(inline) fn main f0 {
+      b0(v0: Field, v1: Field, v2: Field):
+        v3 = make_array [v0, v1, v2] : [Field]
+        v4 = call phase_challenge_multi_slice(u32 3, v3) -> [Field; 2]
+        v5 = array_get v4, index u32 0 -> Field
+        constrain v5 == v0
+        return
+    }
+    ";
+    let program = ssa_to_acir_program(src);
+
+    // w0, w1, w2 are input witnesses. The slice has length 3 with data [w0, w1, w2].
+    // Phase barrier commits to all three and produces two challenge outputs (w3, w4).
+    // The array_get at index 0 reads w3, then constrain w3 == w0.
+    assert_circuit_snapshot!(program, @r"
+    func 0
+    private parameters: [w0, w1, w2]
+    public parameters: []
+    return values: []
+    PHASE_BARRIER phase: 0, commits: [w0, w1, w2], outputs: [w3, w4]
+    ASSERT w3 = w0
+    ");
+}
+
+#[test]
 fn vector_push_back_known_length() {
     // This SSA would never be generated as we are writing to a vector without a preceding OOB check.
     // We forego the OOB check here for the succinctness of the test.
