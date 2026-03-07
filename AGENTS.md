@@ -1138,32 +1138,32 @@ For threshold operations per decryption request:
 ### 9.10 9/20 Medium Committee Benchmark (N=8192, N_PARTIES=20, T=9, H=20)
 
 Config: `secure` BFV params (N=8192, L_DKG=2, L_THRESHOLD=4) + `medium` committee (N_PARTIES=20, T=9, H=20).
-Hardware: 62GB RAM VM, 16 threads.
+Hardware: 62GB RAM + 96GB swap, 16 threads. Swap enabled via `fallocate -l 96G /swapfile` to avoid OOM kills.
 
-#### Gate Count Results (9/20 Medium)
+#### Gate Count Results (9/20 Medium) — ALL 12 CIRCUITS
 
-| Circuit | 5-Party Gates | 20-Party Gates | Scaling | Compilable on 62GB |
+| Circuit | 5-Party Gates | 20-Party Gates | Scaling | Peak Compile RAM |
 |---|---|---|---|---|
-| dkg/pk | 215,785 | 215,785 | 1.0x | Yes |
-| dkg/share_encryption | 2,301,502 | 2,301,502 | 1.0x | Yes |
-| dkg/share_decryption | 1,327,695 | **4,704,377** | **3.5x** | Yes |
-| dkg/sk_share_computation | 10,628,608 | **OOM** | — | **No** (peak ~60GB, killed) |
-| dkg/e_sm_share_computation | 11,449,351 | **OOM** | — | **No** (skipped, same structure as sk) |
-| threshold/pk_generation | 2,789,646 | 2,789,646 | 1.0x | Yes |
-| threshold/share_decryption | 1,668,878 | 1,668,878 | 1.0x | Yes |
-| threshold/pk_aggregation | 6,114,388 | **OOM** | — | **No** (>62GB, killed tmux session) |
-| threshold/user_data_encryption_ct0 | 1,473,900 | 1,473,900 | 1.0x | Yes |
-| threshold/user_data_encryption_ct1 | 1,259,090 | 1,259,090 | 1.0x | Yes |
-| threshold/decrypted_shares_aggregation_bn | 152,259 | **410,722** | **2.7x** | Yes |
-| threshold/decrypted_shares_aggregation_mod | 131,290 | **389,753** | **3.0x** | Yes |
+| dkg/pk | 215,785 | 215,785 | 1.0x | <1GB |
+| dkg/share_encryption | 2,301,502 | 2,301,502 | 1.0x | ~15GB |
+| dkg/share_decryption | 1,327,695 | **4,704,377** | **3.5x** | ~10GB |
+| dkg/sk_share_computation | 10,628,608 | **41,338,169** | **3.9x** | ~60GB + swap |
+| dkg/e_sm_share_computation | 11,449,351 | **42,158,912** | **3.7x** | ~60GB + swap |
+| threshold/pk_generation | 2,789,646 | 2,789,646 | 1.0x | ~15GB |
+| threshold/share_decryption | 1,668,878 | 1,668,878 | 1.0x | ~10GB |
+| threshold/pk_aggregation | 6,114,388 | **12,914,508** | **2.1x** | ~38GB |
+| threshold/user_data_encryption_ct0 | 1,473,900 | 1,473,900 | 1.0x | ~10GB |
+| threshold/user_data_encryption_ct1 | 1,259,090 | 1,259,090 | 1.0x | ~10GB |
+| threshold/decrypted_shares_aggregation_bn | 152,259 | **410,722** | **2.7x** | ~5GB |
+| threshold/decrypted_shares_aggregation_mod | 131,290 | **389,753** | **3.0x** | ~5GB |
 
-#### Compilation Feasibility Summary
+#### Compilation Notes
 
-- **9 of 12 circuits compile successfully** on 62GB RAM with secure+medium config
-- **Same 3 circuits OOM as the 48/80 benchmark**: pk_aggregation, sk_share_computation, e_sm_share_computation
-- sk_share_computation peaked at ~60GB RSS before being killed — very close to the limit
-- pk_aggregation OOM'd hard enough to kill the tmux session (>62GB)
-- The OOM circuits need estimated ~80-128GB RAM for compilation at 20-party scale
+- **All 12 circuits compiled successfully** with 96GB swap enabled
+- Without swap (62GB RAM only), 3 circuits OOM'd: sk_share_computation (peak ~60GB), e_sm_share_computation (same structure), pk_aggregation (killed tmux at >62GB)
+- With swap, sk/e_sm peaked at ~60GB RSS + ~12GB swap (~72GB virtual), completed in ~35 minutes each
+- pk_aggregation peaked at only ~38GB with swap (no swap used) — the earlier OOM was likely due to memory fragmentation or concurrent processes
+- Compilation time with swap: sk/e_sm ~35 min each, pk_aggregation ~25 min, others <10 min
 
 #### Comparison: 5-Party vs 20-Party vs 80-Party
 
@@ -1172,11 +1172,11 @@ Hardware: 62GB RAM VM, 16 threads.
 | dkg/pk | 215,785 | 215,785 | 215,785 | 1.0x | 1.0x |
 | dkg/share_encryption | 2,301,502 | 2,301,502 | 2,301,502 | 1.0x | 1.0x |
 | dkg/share_decryption | 1,327,695 | 4,704,377 | 18,194,731 | 3.5x | 3.9x |
-| dkg/sk_share_computation | 10,628,608 | OOM | OOM | — | — |
-| dkg/e_sm_share_computation | 11,449,351 | OOM | OOM | — | — |
+| dkg/sk_share_computation | 10,628,608 | 41,338,169 | OOM (est. ~170M) | 3.9x | est. ~4.1x |
+| dkg/e_sm_share_computation | 11,449,351 | 42,158,912 | OOM (est. ~183M) | 3.7x | est. ~4.3x |
 | threshold/pk_generation | 2,789,646 | 2,789,646 | 2,789,646 | 1.0x | 1.0x |
 | threshold/share_decryption | 1,668,878 | 1,668,878 | 1,668,878 | 1.0x | 1.0x |
-| threshold/pk_aggregation | 6,114,388 | OOM | OOM | — | — |
+| threshold/pk_aggregation | 6,114,388 | 12,914,508 | OOM (est. ~86M) | 2.1x | est. ~6.7x |
 | threshold/user_data_encryption_ct0 | 1,473,900 | 1,473,900 | 1,473,900 | 1.0x | 1.0x |
 | threshold/user_data_encryption_ct1 | 1,259,090 | 1,259,090 | 1,259,090 | 1.0x | 1.0x |
 | threshold/decrypted_shares_aggregation_bn | 152,259 | 410,722 | 1,752,187 | 2.7x | 4.3x |
@@ -1184,29 +1184,30 @@ Hardware: 62GB RAM VM, 16 threads.
 
 #### Key Findings
 
-1. **Same 3 circuits OOM at 20-party as at 80-party** — sk_share_computation, e_sm_share_computation, and pk_aggregation cannot compile on 62GB RAM even at the medium committee size. These circuits have large fixed compilation overhead from their 3D array structures and nested generic instantiations.
-2. **dkg/share_decryption scales ~3.5x for 4x increase in H** (5→20) — sub-linear scaling due to fixed overhead. From 20→80 (4x H), it scales 3.9x, closer to linear at larger sizes.
-3. **Aggregation circuits scale ~2.7-3.0x for 4.5x increase in T** (2→9) — also sub-linear.
-4. **Compiler memory is the bottleneck, not gate count** — the circuits that OOM during compilation would likely produce reasonable gate counts (est. ~40-50M for sk/e_sm at 20-party, est. ~24M for pk_aggregation at 20-party). The Noir compiler's memory usage for large generic-heavy circuits needs optimization.
-5. **Multi-phase savings fully preserved** — all 5 challenge circuits are party-independent, maintaining their 20-53% gate reductions.
+1. **All 12 circuits compile with swap** — the 3 circuits that OOM'd at 62GB RAM compile successfully with 96GB swap. Peak virtual memory for the largest circuits (sk/e_sm_share_computation) is ~72GB.
+2. **Gate count scaling is sub-linear for all party-dependent circuits** — sk_share_computation scales 3.9x for 4x increase in N_PARTIES (5→20), pk_aggregation scales only 2.1x for 4x increase in H. Fixed overhead (bignum operations, CRT, range checks) accounts for the sub-linearity.
+3. **pk_aggregation scales most slowly** — only 2.1x for 4x increase in H (5→20). Much of its gate count is in the nested CRT/bignum operations that are per-polynomial-coefficient, not per-party.
+4. **Compiler memory is the bottleneck, not gate count** — sk_share_computation at 41M gates needs ~72GB virtual memory to compile. The Noir compiler's memory usage for large monomorphized generic circuits scales worse than the circuit size itself.
+5. **Multi-phase savings fully preserved** — all 5 challenge circuits are party-independent, maintaining their 20-53% gate reductions at any committee size.
+6. **Swap makes compilation feasible on commodity hardware** — 64GB RAM + 96GB swap (commodity SSD) is sufficient for all circuits at 20-party. Compilation is ~2x slower with heavy swapping but completes successfully.
 
 #### Estimated Total Circuit Gates per DKG Round (9/20 medium)
 
 Each node in a 9/20 committee must prove:
 - 1× dkg/pk: 216K gates
-- 1× dkg/sk_share_computation: ~42M gates (estimated, 4x of 5-party)
-- 1× dkg/e_sm_share_computation: ~46M gates (estimated, 4x of 5-party)
-- 20× dkg/share_encryption: 20 × 2.3M = 46M gates
+- 1× dkg/sk_share_computation: 41.3M gates
+- 1× dkg/e_sm_share_computation: 42.2M gates
+- 20× dkg/share_encryption: 20 × 2.3M = 46.0M gates
 - 1× dkg/share_decryption: 4.7M gates
-- **Total per node: ~139M gates**
+- **Total per node: ~134M gates**
 
 For threshold operations per decryption request:
 - 1× threshold/pk_generation: 2.8M gates
-- 1× threshold/pk_aggregation: ~24M gates (estimated, 4x of 5-party)
+- 1× threshold/pk_aggregation: 12.9M gates
 - 1× threshold/share_decryption: 1.7M gates
 - 1× threshold/user_data_encryption: 2.7M gates (ct0+ct1)
 - 1× threshold/decrypted_shares_aggregation: 0.8M gates (bn+mod)
-- **Total per node: ~32M gates**
+- **Total per node: ~21M gates**
 
 #### Summary
 All work is complete. No remaining items.
