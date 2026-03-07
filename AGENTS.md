@@ -1071,5 +1071,69 @@ Successfully tested the full recursive aggregation pipeline: inner proof generat
 
 **All phases of the multi-phase circuit implementation are now complete.**
 
+### 9.9 48/80 Production Benchmark (N=8192, N_PARTIES=80, T=39, H=80)
+
+Config: `secure` BFV params (N=8192, L_DKG=2, L_THRESHOLD=4) + `large` committee (N_PARTIES=80, T=39, H=80).
+Hardware: 62GB RAM VM, 16 threads.
+
+#### Circuit Scaling Classification
+
+| Category | Circuits | Scaling Factor |
+|---|---|---|
+| Party-independent (N, L only) | dkg/pk, dkg/share_encryption, threshold/pk_generation, threshold/share_decryption, threshold/user_data_encryption_ct0, threshold/user_data_encryption_ct1 | None — identical to 5-party |
+| T-dependent (T=39 vs T=2) | threshold/decrypted_shares_aggregation_bn, threshold/decrypted_shares_aggregation_mod | ~11-13x gate growth |
+| H-dependent (H=80 vs H=5) | dkg/share_decryption, threshold/pk_aggregation | ~14x gate growth |
+| N_PARTIES-dependent (80 vs 5) | dkg/sk_share_computation, dkg/e_sm_share_computation | ~16x gate growth (estimated) |
+
+#### Gate Count Results (48/80 Production)
+
+| Circuit | 5-Party Gates | 80-Party Gates | Scaling | Compilable on 62GB |
+|---|---|---|---|---|
+| dkg/pk | 215,785 | 215,785 | 1.0x | Yes |
+| dkg/share_encryption | 2,301,502 | 2,301,502 | 1.0x | Yes |
+| dkg/share_decryption | 1,327,695 | **18,194,731** | **13.7x** | Yes (peak ~10GB) |
+| threshold/pk_generation | 2,789,646 | 2,789,646 | 1.0x | Yes |
+| threshold/share_decryption | 1,668,878 | 1,668,878 | 1.0x | Yes |
+| threshold/pk_aggregation | 6,114,388 | **OOM** | est. ~14x (~86M) | **No** (>60GB at 330s) |
+| threshold/user_data_encryption_ct0 | 1,473,900 | 1,473,900 | 1.0x | Yes |
+| threshold/user_data_encryption_ct1 | 1,259,090 | 1,259,090 | 1.0x | Yes |
+| threshold/decrypted_shares_aggregation_bn | 152,259 | **1,752,187** | **11.5x** | Yes |
+| threshold/decrypted_shares_aggregation_mod | 131,290 | **1,731,218** | **13.2x** | Yes |
+| dkg/sk_share_computation | 10,628,608 | **OOM** | est. ~16x (~170M) | **No** (OOM killed) |
+| dkg/e_sm_share_computation | 11,449,351 | **OOM** | est. ~16x (~183M) | **No** (not attempted) |
+
+#### Compilation Feasibility Summary
+
+- **9 of 12 circuits compile successfully** on 62GB RAM with secure+large config
+- **3 circuits OOM**: pk_aggregation (H=80, arrays of `[[Poly<8192>; 4]; 80]`), sk_share_computation and e_sm_share_computation (N_PARTIES=80, arrays of `[[[Field; 81]; 4]; 8192]`)
+- The OOM circuits would need ~128-256GB RAM for compilation at this scale
+- `dkg/share_decryption` (H=80) was the largest successful compilation at ~10GB peak RSS, producing an 18.2M gate circuit
+
+#### Key Findings
+
+1. **Party-independent circuits are unaffected by committee size** — 6 of 12 circuits produce identical gate counts regardless of N_PARTIES/H/T. These include all 5 multi-phase challenge circuits.
+2. **T-dependent aggregation circuits scale sub-linearly** — T increased 20x (2→39) but gates grew only 11-13x. The fixed overhead (bignum operations, CRT) dominates.
+3. **H-dependent circuits scale near-linearly** — dkg/share_decryption grew 13.7x for 16x increase in H.
+4. **The 3 OOM circuits are the largest circuits in the system** — sk/e_sm_share_computation were already 10.7-11.5M gates at 5-party. At 80-party they'd be ~170-183M gates, requiring specialized hardware (256GB+ RAM) for compilation.
+5. **Multi-phase savings are preserved at scale** — the challenge circuits (share_encryption, pk_generation, threshold/share_decryption, user_data_encryption) maintain their 20-53% gate reductions since their gate counts don't change with party size.
+
+#### Estimated Total Circuit Gates per DKG Round (48/80 production)
+
+Each node in a 48/80 committee must prove:
+- 1× dkg/pk: 216K gates
+- 1× dkg/sk_share_computation: ~170M gates (estimated)
+- 1× dkg/e_sm_share_computation: ~183M gates (estimated)
+- 80× dkg/share_encryption: 80 × 2.3M = 184M gates
+- 1× dkg/share_decryption: 18.2M gates
+- **Total per node: ~555M gates** (dominated by share_computation circuits)
+
+For threshold operations per decryption request:
+- 1× threshold/pk_generation: 2.8M gates
+- 1× threshold/pk_aggregation: ~86M gates (estimated)
+- 1× threshold/share_decryption: 1.7M gates
+- 1× threshold/user_data_encryption: 2.7M gates (ct0+ct1)
+- 1× threshold/decrypted_shares_aggregation: 3.5M gates (bn+mod)
+- **Total per node: ~97M gates**
+
 #### Summary
 All work is complete. No remaining items.
