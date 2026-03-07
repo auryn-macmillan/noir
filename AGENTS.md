@@ -1039,7 +1039,37 @@ Successfully tested the full compile → execute → prove → verify pipeline f
 
 All 5 phase-challenge circuits (share_encryption, pk_generation, share_decryption/threshold, user_data_encryption_ct0, user_data_encryption_ct1) successfully execute PhaseBarrier during witness generation (KZG commit + standalone Poseidon2 challenge derivation) and produce valid proofs that verify correctly.
 
-**Recursive verification**: Not yet tested. Requires generating valid inner proofs and feeding them to the recursive aggregation wrapper circuits. The infrastructure is now unblocked (all inner circuits produce valid proofs), but the recursive wrappers need additional witness data (inner proof bytes, VK) that the current `zk_cli` does not generate.
+**Recursive verification**: COMPLETE. All wrapper and fold tests pass. See below.
 
-#### Summary of remaining work
-- Recursive verification test (inner proofs now available; needs wrapper witness generation)
+#### E.4b: Recursive verification test — COMPLETE (ALL 10 WRAPPERS + FOLD)
+
+Successfully tested the full recursive aggregation pipeline: inner proof generation → wrapper proof generation (recursive verification) → fold proof generation → verification at each stage. **All 10 wrapper tests + 1 fold test pass.**
+
+**Test results (insecure mode, N=512, all 10 wrappers + fold):**
+
+| # | Test | Inner Circuit(s) | Phase Challenge | Wrapper/Fold | Result |
+|---|---|---|---|---|---|
+| 1 | wrapper (dkg/pk) | 1× dkg/pk | No | dkg/pk wrapper | PASSED (7.3s) |
+| 2 | wrapper 2-proof (dkg/share_decryption) | 2× dkg/share_decryption | No | dkg/share_decryption wrapper | PASSED (16.6s) |
+| 3 | wrapper (threshold/pk_generation) | 1× threshold/pk_generation | **Yes** | threshold/pk_generation wrapper | PASSED (10.1s) |
+| 4 | wrapper (dkg/share_encryption) | 2× dkg/share_encryption | **Yes** | dkg/share_encryption wrapper | PASSED (11.0s) |
+| 5 | fold (pk + share_encryption) | pk wrapper + share_enc wrapper | **Mixed** | fold circuit | PASSED (30.1s total) |
+| 6 | wrapper (threshold/pk_aggregation) | 1× threshold/pk_aggregation | No | threshold/pk_aggregation wrapper | PASSED (12.3s) |
+| 7 | wrapper (threshold/share_decryption) | 1× threshold/share_decryption | **Yes** | threshold/share_decryption wrapper | PASSED (12.5s) |
+| 8 | wrapper (dkg/share_computation) | 2× dkg/sk_share_computation | No | dkg/share_computation wrapper | PASSED (22.9s) |
+| 9 | wrapper (threshold/decrypted_shares_aggregation) | 1× decrypted_shares_aggregation_mod | No | threshold/decrypted_shares_aggregation wrapper | PASSED (11.3s) |
+| 10 | wrapper (threshold/user_data_encryption) | 1× ct0 + 1× ct1 | **Yes** | threshold/user_data_encryption wrapper | PASSED (7.4s) |
+
+**Key findings:**
+- Multi-phase inner proofs (with `PhaseBarrier` and KZG commitment) are correctly recursively verified in wrapper circuits
+- The modified OinkVerifier correctly handles phase barrier commitments in the recursive transcript (absorb commitment, no challenge squeeze)
+- Cross-circuit folding works: a non-phase wrapper (dkg/pk) and a multi-phase wrapper (dkg/share_encryption) can be folded together
+- Inner proofs for multi-phase circuits are 14,496 bytes (453 fields) — 4 fields larger than non-phase proofs (14,368 bytes / 449 fields), accounting for the extra phase barrier commitment (1 group element = 4 field limbs in the proof)
+- All wrapper_name resolution fixes work correctly (shared wrappers for share_computation, decrypted_shares_aggregation)
+- Fixed N_PUBLIC_INPUTS bugs in pk_generation (was (L*N)+3, now 3) and share_decryption (was 2+3*L*N, now 2+2*L*N)
+- user_data_encryption wrapper correctly handles dual-VK structure (ct0: 4 public inputs, ct1: 3 public inputs)
+
+**All phases of the multi-phase circuit implementation are now complete.**
+
+#### Summary
+All work is complete. No remaining items.
