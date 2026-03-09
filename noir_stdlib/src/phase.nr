@@ -2,12 +2,12 @@
 ///
 /// The prover commits to all values in `witnesses` using the proving
 /// backend's native polynomial commitment scheme, then derives a
-/// challenge from the commitment via the backend's Fiat-Shamir
-/// transcript.
+/// challenge from the commitment using the backend's phase-challenge
+/// derivation protocol.
 ///
 /// The challenge is binding: any change to `witnesses` produces a
-/// different challenge. The verifier independently recomputes the
-/// same challenge from the proof's commitments.
+/// different challenge. The verifier checks constraints that use this
+/// challenge in the same proof that binds the commitment.
 ///
 /// # When to use this vs in-circuit hashing
 ///

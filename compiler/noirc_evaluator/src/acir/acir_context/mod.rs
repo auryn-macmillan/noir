@@ -67,6 +67,9 @@ pub(crate) struct AcirContext<F: AcirField> {
 }
 
 impl<F: AcirField> AcirContext<F> {
+    const MAX_PHASE_BARRIERS: u32 = 8;
+    const MAX_PHASE_CHALLENGES_PER_BARRIER: usize = 255;
+
     pub(super) fn new(brillig_stdlib: BrilligStdLib<F>) -> Self {
         AcirContext {
             brillig_stdlib,
@@ -1490,6 +1493,25 @@ impl<F: AcirField> AcirContext<F> {
         num_challenges: usize,
         phase_id: u32,
     ) -> Result<Vec<AcirVar>, InternalError> {
+        if phase_id >= Self::MAX_PHASE_BARRIERS {
+            return Err(InternalError::General {
+                message: format!(
+                    "phase_id {phase_id} exceeds maximum supported phase barriers ({})",
+                    Self::MAX_PHASE_BARRIERS
+                ),
+                call_stack: self.get_call_stack(),
+            });
+        }
+        if num_challenges == 0 || num_challenges > Self::MAX_PHASE_CHALLENGES_PER_BARRIER {
+            return Err(InternalError::General {
+                message: format!(
+                    "phase barrier challenge count {num_challenges} is out of range [1..{}]",
+                    Self::MAX_PHASE_CHALLENGES_PER_BARRIER
+                ),
+                call_stack: self.get_call_stack(),
+            });
+        }
+
         // Convert commit vars to witnesses
         let commit_witnesses: Vec<Witness> = commit_vars
             .into_iter()
@@ -1501,10 +1523,8 @@ impl<F: AcirField> AcirContext<F> {
             (0..num_challenges).map(|_| self.acir_ir.next_witness_index()).collect();
 
         // Create AcirVars backed by the new witnesses
-        let challenge_vars: Vec<AcirVar> = challenge_witnesses
-            .iter()
-            .map(|w| self.add_data(AcirVarData::Witness(*w)))
-            .collect();
+        let challenge_vars: Vec<AcirVar> =
+            challenge_witnesses.iter().map(|w| self.add_data(AcirVarData::Witness(*w))).collect();
 
         // Emit the PhaseBarrier opcode
         self.acir_ir.push_opcode(Opcode::PhaseBarrier {

@@ -195,9 +195,15 @@ impl Context<'_> {
             Intrinsic::PhaseChallengeSlice => {
                 // arguments[0] is the length (u32), arguments[1] is the vector of Field witnesses.
                 // Result is a single Field challenge value.
+                let declared_len_var = self.convert_value(arguments[0], dfg).into_var()?;
                 let input_vector = self.convert_value(arguments[1], dfg);
                 let commit_vars: Vec<_> =
                     input_vector.flatten().into_iter().map(|(var, _typ)| var).collect();
+
+                // Enforce that the explicit length argument matches the flattened
+                // vector length to avoid semantic drift on malformed SSA.
+                let actual_len_var = self.acir_context.add_constant(commit_vars.len() as u128);
+                self.acir_context.assert_eq_var(declared_len_var, actual_len_var, None)?;
 
                 let phase_id = self.acir_context.acir_ir.num_phases;
                 let challenge_vars = self.acir_context.phase_barrier(commit_vars, 1, phase_id)?;
@@ -208,9 +214,15 @@ impl Context<'_> {
                 // arguments[0] is the length (u32), arguments[1] is the vector of Field witnesses.
                 // Result is an array of Field challenge values; the size is
                 // determined by the result type.
+                let declared_len_var = self.convert_value(arguments[0], dfg).into_var()?;
                 let input_vector = self.convert_value(arguments[1], dfg);
                 let commit_vars: Vec<_> =
                     input_vector.flatten().into_iter().map(|(var, _typ)| var).collect();
+
+                // Enforce that the explicit length argument matches the flattened
+                // vector length to avoid semantic drift on malformed SSA.
+                let actual_len_var = self.acir_context.add_constant(commit_vars.len() as u128);
+                self.acir_context.assert_eq_var(declared_len_var, actual_len_var, None)?;
 
                 let Type::Array(_, num_challenges) = dfg.type_of_value(result_ids[0]) else {
                     unreachable!("ICE: PhaseChallengeMultiSlice result must be an array");

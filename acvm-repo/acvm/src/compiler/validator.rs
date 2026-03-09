@@ -19,6 +19,9 @@ use acvm_blackbox_solver::{
 };
 use std::collections::HashMap;
 
+const MAX_PHASE_BARRIERS: u32 = 8;
+const MAX_CHALLENGES_PER_PHASE: usize = 255;
+
 fn unsatisfied_constraint<F>(opcode_index: usize, message: String) -> OpcodeResolutionError<F> {
     OpcodeResolutionError::UnsatisfiedConstrain {
         opcode_location: ErrorLocation::Resolved(OpcodeLocation::Acir(opcode_index)),
@@ -55,6 +58,21 @@ pub fn validate_witness<F: AcirField>(
     witness_map: WitnessMap<F>,
     circuit: &Circuit<F>,
 ) -> Result<(), OpcodeResolutionError<F>> {
+    let phase_barrier_count = circuit
+        .opcodes
+        .iter()
+        .filter(|opcode| matches!(opcode, Opcode::PhaseBarrier { .. }))
+        .count() as u32;
+    if circuit.num_phases != phase_barrier_count {
+        return Err(unsatisfied_constraint(
+            0,
+            format!(
+                "Circuit num_phases metadata mismatch: expected {} PhaseBarrier opcode(s), found {}",
+                circuit.num_phases, phase_barrier_count
+            ),
+        ));
+    }
+
     let mut block_solvers: HashMap<BlockId, MemoryOpSolver<F>> = HashMap::new();
 
     for (opcode_index, opcode) in circuit.opcodes.iter().enumerate() {
@@ -403,11 +421,31 @@ pub fn validate_witness<F: AcirField>(
                 }
             }
             Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+                if *phase_id >= MAX_PHASE_BARRIERS {
+                    return Err(unsatisfied_constraint(
+                        opcode_index,
+                        format!(
+                            "PhaseBarrier phase_id {} exceeds maximum supported phase barriers ({})",
+                            phase_id, MAX_PHASE_BARRIERS
+                        ),
+                    ));
+                }
+
                 // Validate structural invariants
                 if challenge_outputs.is_empty() {
                     return Err(unsatisfied_constraint(
                         opcode_index,
                         "PhaseBarrier has no challenge outputs".to_string(),
+                    ));
+                }
+                if challenge_outputs.len() > MAX_CHALLENGES_PER_PHASE {
+                    return Err(unsatisfied_constraint(
+                        opcode_index,
+                        format!(
+                            "PhaseBarrier has {} challenge outputs, exceeding max {}",
+                            challenge_outputs.len(),
+                            MAX_CHALLENGES_PER_PHASE
+                        ),
                     ));
                 }
                 let commit_set: std::collections::BTreeSet<_> = commit_witnesses.iter().collect();
@@ -526,6 +564,9 @@ mod tests {
 
     /// Helper to create a simple circuit with the given opcodes
     fn make_circuit(opcodes: Vec<Opcode<FieldElement>>) -> Circuit<FieldElement> {
+        let num_phases =
+            opcodes.iter().filter(|opcode| matches!(opcode, Opcode::PhaseBarrier { .. })).count()
+                as u32;
         Circuit {
             current_witness_index: 10,
             opcodes,
@@ -534,7 +575,7 @@ mod tests {
             return_values: PublicInputs::default(),
             assert_messages: Default::default(),
             function_name: "test".to_string(),
-            num_phases: 0,
+            num_phases,
         }
     }
 

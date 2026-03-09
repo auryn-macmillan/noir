@@ -34,13 +34,13 @@ pub trait BlackBoxFunctionSolver<F> {
     /// The backend should:
     /// 1. Interpret `witness_values` as data to be committed
     /// 2. Commit using its native polynomial commitment scheme
-    /// 3. Absorb the commitment into its Fiat-Shamir transcript
-    /// 4. Squeeze `num_challenges` independent challenge values
+    /// 3. Derive `num_challenges` challenge values from that commitment
+    ///    according to the backend's phase-challenge protocol
     ///
     /// The challenge derivation must be deterministic: given the same
     /// `witness_values`, the same challenges are always produced. The
-    /// verifier independently recomputes the same challenges from the
-    /// proof's commitments.
+    /// verifier checks constraints that depend on these challenges in
+    /// the same proof that binds the commitments.
     ///
     /// `phase_id` identifies which phase transition this is, allowing
     /// the backend to maintain ordered transcript state across multiple

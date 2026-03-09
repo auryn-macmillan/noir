@@ -333,6 +333,9 @@ pub struct ACVM<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> {
 }
 
 impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
+    const MAX_PHASE_BARRIERS: u32 = 8;
+    const MAX_CHALLENGES_PER_PHASE: usize = 255;
+
     pub fn new(
         backend: &'a B,
         opcodes: &'a [Opcode<F>],
@@ -585,6 +588,17 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
                 }
             }
             Opcode::PhaseBarrier { phase_id, commit_witnesses, challenge_outputs } => {
+                if *phase_id >= Self::MAX_PHASE_BARRIERS {
+                    return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                        phase_id: *phase_id,
+                        reason: format!(
+                            "phase_id {} exceeds maximum supported phase barriers ({})",
+                            phase_id,
+                            Self::MAX_PHASE_BARRIERS
+                        ),
+                    });
+                }
+
                 // Validate: phase_id must be sequential (0, 1, 2, ...)
                 if *phase_id != self.next_phase_id {
                     return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
@@ -601,6 +615,16 @@ impl<'a, F: AcirField, B: BlackBoxFunctionSolver<F>> ACVM<'a, F, B> {
                     return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
                         phase_id: *phase_id,
                         reason: "PhaseBarrier has no challenge outputs".into(),
+                    });
+                }
+                if challenge_outputs.len() > Self::MAX_CHALLENGES_PER_PHASE {
+                    return self.fail(OpcodeResolutionError::PhaseChallengeDerivationFailed {
+                        phase_id: *phase_id,
+                        reason: format!(
+                            "PhaseBarrier challenge output count {} exceeds maximum ({})",
+                            challenge_outputs.len(),
+                            Self::MAX_CHALLENGES_PER_PHASE
+                        ),
                     });
                 }
 
